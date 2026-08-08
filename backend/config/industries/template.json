@@ -1,0 +1,31 @@
+{
+  "domain": "template",
+  "version": "1.0",
+  "description": "Template for new industry configurations. Copy and customize for your domain.",
+  "entity_types": [],
+  "relation_types": [],
+  "security_classifications": [
+    "PUBLIC",
+    "INTERNAL",
+    "RESTRICTED"
+  ],
+  "default_classification": "INTERNAL",
+  "chunking_rules": {
+    "parent_token_range": [1024, 2048],
+    "child_token_range": [128, 256],
+    "table_as_single_chunk": true,
+    "figure_min_caption_length": 10
+  },
+  "embedding_config": {
+    "model": "voyage-multimodal-3.5",
+    "text_model": "voyage-3.5",
+    "dimensions": 1024,
+    "text_modality": "text",
+    "image_modality": "image"
+  },
+  "metadata_fields": {
+    "document_type": [],
+    "equipment_category": [],
+    "revision_tracking": false
+  }
+}

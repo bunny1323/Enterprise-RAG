@@ -1,0 +1,1 @@
+# infrastructure weaviate package
