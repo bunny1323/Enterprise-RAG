@@ -1,0 +1,49 @@
+{
+  "domain": "manufacturing",
+  "version": "1.0",
+  "description": "Manufacturing industry configuration for enterprise RAG enrichment",
+  "entity_types": [
+    "PhysicalComponent",
+    "SystemFaultCode",
+    "Procedure",
+    "MaintenanceTask",
+    "SafetyWarning",
+    "PartNumber",
+    "Assembly",
+    "Specification"
+  ],
+  "relation_types": [
+    {"name": "SUPPLIES_FLUID_TO", "description": "Hydraulic/pneumatic fluid supply relationship"},
+    {"name": "WIRED_TO", "description": "Electrical wiring connection"},
+    {"name": "TRIGGERS", "description": "Fault code or condition that triggers an action"},
+    {"name": "REQUIRES", "description": "Component or procedure dependency"},
+    {"name": "REPLACES", "description": "Replacement or superseded component"},
+    {"name": "MOUNTED_ON", "description": "Physical mounting relationship"},
+    {"name": "CONNECTED_TO", "description": "General connection (mechanical, electrical, data)"},
+    {"name": "PRECEDED_BY", "description": "Procedure step ordering"}
+  ],
+  "security_classifications": [
+    "PUBLIC",
+    "INTERNAL",
+    "RESTRICTED"
+  ],
+  "default_classification": "INTERNAL",
+  "chunking_rules": {
+    "parent_token_range": [1024, 2048],
+    "child_token_range": [128, 256],
+    "table_as_single_chunk": true,
+    "figure_min_caption_length": 10
+  },
+  "embedding_config": {
+    "model": "voyage-multimodal-3.5",
+    "text_model": "voyage-3.5",
+    "dimensions": 1024,
+    "text_modality": "text",
+    "image_modality": "image"
+  },
+  "metadata_fields": {
+    "document_type": ["service_manual", "parts_catalog", "safety_bulletin", "technical_specification", "procedure"],
+    "equipment_category": ["hydraulic_system", "electrical_system", "mechanical_assembly", "control_system"],
+    "revision_tracking": true
+  }
+}
