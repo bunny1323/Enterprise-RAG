@@ -45,20 +45,36 @@ class IngestionSupervisor:
 
     # ── Upload handler (fast path) ─────────────────────────────────────────────
 
-    async def handle_upload(self, file: UploadFile, industry: str) -> dict:
+    async def handle_upload(
+        self,
+        file: UploadFile,
+        industry: str = "manufacturing",
+        tenant_id: str = "default",
+        assistant_id: str = "default",
+        knowledge_base_id: str = "default",
+    ) -> dict:
         """
-        Accept an upload, register the document, and enqueue for processing.
+        Accept an upload, register the document and job, and enqueue for processing.
 
         This method MUST return in <100ms. All expensive work happens in process_queue.
 
         Args:
             file: FastAPI UploadFile object from the multipart request.
             industry: Industry domain label (default: manufacturing).
+            tenant_id: Tenant identifier.
+            assistant_id: Assistant identifier.
+            knowledge_base_id: Knowledge base identifier.
 
         Returns:
-            {'document_id': str, 'status': 'PENDING'}
+            {'document_id': str, 'job_id': str, 'status': 'RECEIVED'}
         """
-        logger.info("supervisor.upload_start", filename=file.filename, industry=industry)
+        logger.info(
+            "supervisor.upload_start",
+            filename=file.filename,
+            industry=industry,
+            tenant_id=tenant_id,
+            kb_id=knowledge_base_id,
+        )
 
         # Read file bytes from multipart stream
         file_bytes = await file.read()
@@ -66,25 +82,53 @@ class IngestionSupervisor:
         # Save to raw storage (synchronous path op, fast)
         storage_path = self._storage.save_upload(file_bytes, file.filename or "upload.pdf")
 
-        # INSERT document record into Supabase immediately (sha256 set later by step 02)
-        row = await self._postgres.fetchrow(
+        # INSERT document record immediately
+        doc_row = await self._postgres.fetchrow(
             """
-            INSERT INTO documents (sha256, file_name, storage_path, industry, status)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO documents (
+                sha256, file_name, storage_path, industry,
+                tenant_id, assistant_id, knowledge_base_id, status
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING id
             """,
             "",  # sha256 placeholder — step 02 will compute and update this
             file.filename or "upload.pdf",
             storage_path,
             industry,
+            tenant_id,
+            assistant_id,
+            knowledge_base_id,
             DocumentStatus.PENDING.value,
         )
 
-        document_id: UUID = row["id"]  # type: ignore[index]
+        document_id: UUID = doc_row["id"]  # type: ignore[index]
+
+        # INSERT ingestion job record immediately
+        job_row = await self._postgres.fetchrow(
+            """
+            INSERT INTO ingestion_jobs (
+                document_id, tenant_id, assistant_id, knowledge_base_id, status, started_at
+            )
+            VALUES ($1, $2, $3, $4, $5, NOW())
+            RETURNING job_id
+            """,
+            document_id,
+            tenant_id,
+            assistant_id,
+            knowledge_base_id,
+            "RECEIVED",
+        )
+
+        job_id: UUID = job_row["job_id"]  # type: ignore[index]
 
         # Build initial state and enqueue for background processing
         state = IngestionState(
             document_id=document_id,
+            job_id=job_id,
+            tenant_id=tenant_id,
+            assistant_id=assistant_id,
+            knowledge_base_id=knowledge_base_id,
             filename=file.filename or "upload.pdf",
             industry=industry,
             storage_path=storage_path,
@@ -96,12 +140,14 @@ class IngestionSupervisor:
         logger.info(
             "supervisor.upload_complete",
             document_id=str(document_id),
+            job_id=str(job_id),
             queued=self._queue.qsize(),
         )
 
         return {
             "document_id": str(document_id),
-            "status": DocumentStatus.PENDING.value,
+            "job_id": str(job_id),
+            "status": "RECEIVED",
         }
 
     # ── Queue processor (slow path, runs as background task) ──────────────────

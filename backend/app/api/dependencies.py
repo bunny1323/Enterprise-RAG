@@ -21,6 +21,12 @@ from app.services.storage.service import StorageService
 from app.services.vision.service import VisionService
 
 
+from app.infrastructure.opa.client import OPAClient
+from app.infrastructure.redis.client import RedisClient
+from app.models.tenant import TenantContext
+from app.services.cache.service import CacheService
+
+
 # ── Settings ───────────────────────────────────────────────────────────────────
 
 def get_settings_dep() -> Settings:
@@ -48,9 +54,48 @@ def get_neo4j(request: Request) -> Neo4jClient:
     return request.app.state.neo4j
 
 
+def get_redis(request: Request) -> RedisClient | None:
+    """Return the shared RedisClient from application state."""
+    return getattr(request.app.state, "redis", None)
+
+
+def get_opa(request: Request) -> OPAClient:
+    """Return the shared OPAClient from application state."""
+    return getattr(request.app.state, "opa", OPAClient())
+
+
 def get_supervisor(request: Request):  # type: ignore[return]
     """Return the shared IngestionSupervisor from application state."""
     return request.app.state.supervisor
+
+
+# ── Security & Multi-tenancy ───────────────────────────────────────────────────
+
+def get_tenant_context(request: Request) -> TenantContext:
+    """
+    Extract authenticated identity and tenant context from request headers.
+    Headers:
+        X-Tenant-ID
+        X-Assistant-ID
+        X-Knowledge-Base-ID
+        X-Access-Level
+    """
+    tenant_id = request.headers.get("X-Tenant-ID", "default")
+    assistant_id = request.headers.get("X-Assistant-ID", "default")
+    kb_id = request.headers.get("X-Knowledge-Base-ID", "default")
+    access_level = request.headers.get("X-Access-Level", "INTERNAL")
+    user_id = request.headers.get("X-User-ID", None)
+
+    return TenantContext(
+        tenant_id=tenant_id,
+        assistant_id=assistant_id,
+        knowledge_base_id=kb_id,
+        access_level=access_level,
+        user_id=user_id,
+    )
+
+
+TenantContextDep = Annotated[TenantContext, Depends(get_tenant_context)]
 
 
 # ── Per-request service factories (stateless, cheap to create) ─────────────────
@@ -109,3 +154,4 @@ PostgresDep = Annotated[PostgresClient, Depends(get_postgres)]
 WeaviateDep = Annotated[WeaviateClient, Depends(get_weaviate)]
 Neo4jDep = Annotated[Neo4jClient, Depends(get_neo4j)]
 SupervisorDep = Annotated[object, Depends(get_supervisor)]
+

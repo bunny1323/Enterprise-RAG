@@ -10,11 +10,13 @@ from typing import AsyncIterator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import documents, health
+from app.api.routes import documents, health, jobs, query
 from app.config.logging import configure_logging, get_logger
 from app.config.settings import get_settings
 from app.infrastructure.neo4j.client import Neo4jClient
+from app.infrastructure.opa.client import OPAClient
 from app.infrastructure.postgres.client import PostgresClient
+from app.infrastructure.redis.client import RedisClient
 from app.infrastructure.storage.client import StorageClient
 from app.infrastructure.weaviate.client import WeaviateClient
 from app.agents.supervisor.agent import IngestionSupervisor
@@ -22,6 +24,7 @@ from app.pipelines.ingestion.pipeline import IngestionPipeline
 from app.services.chunking.service import ChunkingService
 from app.services.document_parser.service import DocumentParserService
 from app.services.embeddings.service import EmbeddingService
+from app.services.generation.llm import OllamaProvider
 from app.services.metadata.service import MetadataService
 from app.services.ocr.service import OCRService
 from app.services.storage.service import StorageService
@@ -65,7 +68,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await neo4j_client.init_schema()
     app.state.neo4j = neo4j_client
 
-    # ── 4. Storage client ──────────────────────────────────────────────────────
+    # ── 4. Redis Client ────────────────────────────────────────────────────────
+    redis_client = RedisClient(redis_url=settings.redis_url)
+    await redis_client.connect()
+    app.state.redis = redis_client
+
+    # ── 5. OPA Client ──────────────────────────────────────────────────────────
+    opa_client = OPAClient()
+    app.state.opa = opa_client
+
+    # ── 6. Storage client ──────────────────────────────────────────────────────
     storage_client = StorageClient(
         raw_path=settings.raw_storage_path,
         processed_path=settings.processed_storage_path,
@@ -73,7 +85,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     app.state.storage = storage_client
 
-    # ── 5. Services ────────────────────────────────────────────────────────────
+    # ── 7. Services & Providers ────────────────────────────────────────────────
     storage_service = StorageService(storage_client)
     parser_service = DocumentParserService()
     ocr_service = OCRService()
@@ -87,8 +99,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         api_key=settings.voyage_api_key,
         model=settings.voyage_model,
     )
+    llm_provider = OllamaProvider(
+        base_url=settings.ollama_base_url,
+        model=settings.ollama_vision_model,
+    )
+    app.state.embedder = embedding_service
+    app.state.llm_provider = llm_provider
 
-    # ── 6. Pipeline and supervisor ─────────────────────────────────────────────
+    # ── 8. Pipeline and supervisor ─────────────────────────────────────────────
     services_registry: dict = {
         "postgres": postgres,
         "weaviate": weaviate_client,
@@ -111,7 +129,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.supervisor = supervisor
     app.state.settings = settings
 
-    # ── 7. Start background queue worker ──────────────────────────────────────
+    # ── 9. Start background queue worker ──────────────────────────────────────
     queue_task = asyncio.create_task(supervisor.process_queue())
     app.state.queue_task = queue_task
     logger.info("startup.queue_worker_started")
@@ -134,6 +152,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await postgres.close()
     weaviate_client.close()
     await neo4j_client.close()
+    await redis_client.close()
+    await opa_client.close()
+    await llm_provider.close()
     vision_service.close()
 
     logger.info("shutdown.complete")
@@ -145,8 +166,8 @@ def create_app() -> FastAPI:
 
     app = FastAPI(
         title=settings.app_name,
-        description="Enterprise Multi-Agent RAG Platform — Phase 1 Ingestion Pipeline",
-        version="1.0.0",
+        description="Enterprise Multi-Agent RAG Platform — Phase 1 & 2 Complete Architecture",
+        version="2.0.0",
         docs_url="/docs",
         redoc_url="/redoc",
         openapi_url="/openapi.json",
@@ -165,6 +186,8 @@ def create_app() -> FastAPI:
     # ── Routers ────────────────────────────────────────────────────────────────
     app.include_router(health.router)
     app.include_router(documents.router)
+    app.include_router(jobs.router)
+    app.include_router(query.router)
 
     return app
 

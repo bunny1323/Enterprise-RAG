@@ -15,28 +15,48 @@ logger = get_logger(__name__)
 # ── DDL ────────────────────────────────────────────────────────────────────────
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS documents (
-    id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    sha256           TEXT        UNIQUE NOT NULL,
-    file_name        TEXT        NOT NULL,
-    storage_path     TEXT        NOT NULL,
-    industry         TEXT        NOT NULL DEFAULT 'manufacturing',
-    page_count       INTEGER,
-    status           TEXT        NOT NULL DEFAULT 'PENDING',
-    progress_percent INTEGER     DEFAULT 0,
-    metadata         JSONB       DEFAULT '{}',
-    created_at       TIMESTAMPTZ DEFAULT NOW(),
-    completed_at     TIMESTAMPTZ,
-    error_message    TEXT
+    id                    UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    sha256                TEXT        NOT NULL,
+    file_name             TEXT        NOT NULL,
+    storage_path          TEXT        NOT NULL,
+    industry              TEXT        NOT NULL DEFAULT 'manufacturing',
+    tenant_id             TEXT        NOT NULL DEFAULT 'default',
+    assistant_id          TEXT        NOT NULL DEFAULT 'default',
+    knowledge_base_id     TEXT        NOT NULL DEFAULT 'default',
+    content_hash          TEXT,
+    version               INTEGER     DEFAULT 1,
+    canonical_document_id UUID        REFERENCES documents(id),
+    supersedes            UUID        REFERENCES documents(id),
+    parser_version        TEXT,
+    embedding_model       TEXT,
+    embedding_model_version TEXT,
+    page_count            INTEGER,
+    status                TEXT        NOT NULL DEFAULT 'PENDING',
+    progress_percent      INTEGER     DEFAULT 0,
+    metadata              JSONB       DEFAULT '{}',
+    created_at            TIMESTAMPTZ DEFAULT NOW(),
+    completed_at          TIMESTAMPTZ,
+    error_message         TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_docs_sha256 ON documents(sha256);
 CREATE INDEX IF NOT EXISTS idx_docs_status  ON documents(status);
+CREATE INDEX IF NOT EXISTS idx_docs_tenant  ON documents(tenant_id, knowledge_base_id);
+CREATE INDEX IF NOT EXISTS idx_docs_content_hash ON documents(content_hash);
 
 CREATE TABLE IF NOT EXISTS chunks (
     chunk_id              TEXT        PRIMARY KEY,
     parent_id             TEXT,
     document_id           UUID        REFERENCES documents(id) ON DELETE CASCADE,
+    tenant_id             TEXT        NOT NULL DEFAULT 'default',
+    assistant_id          TEXT        NOT NULL DEFAULT 'default',
+    knowledge_base_id     TEXT        NOT NULL DEFAULT 'default',
     content               TEXT        NOT NULL,
+    content_hash          TEXT,
+    section               TEXT,
+    subsection            TEXT,
+    context_prefix        TEXT,
+    embedding_representation TEXT     DEFAULT 'text',
     page_number           INTEGER,
     bounding_box          JSONB,
     chunk_type            TEXT,
@@ -49,6 +69,73 @@ CREATE TABLE IF NOT EXISTS chunks (
 
 CREATE INDEX IF NOT EXISTS idx_chunks_document ON chunks(document_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_type     ON chunks(chunk_type);
+CREATE INDEX IF NOT EXISTS idx_chunks_tenant   ON chunks(tenant_id, knowledge_base_id);
+CREATE INDEX IF NOT EXISTS idx_chunks_content_hash ON chunks(content_hash);
+
+CREATE TABLE IF NOT EXISTS ingestion_jobs (
+    job_id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    document_id           UUID        REFERENCES documents(id) ON DELETE CASCADE,
+    tenant_id             TEXT        NOT NULL DEFAULT 'default',
+    assistant_id          TEXT        NOT NULL DEFAULT 'default',
+    knowledge_base_id     TEXT        NOT NULL DEFAULT 'default',
+    status                TEXT        NOT NULL DEFAULT 'RECEIVED',
+    current_stage         TEXT,
+    progress_percent      INTEGER     DEFAULT 0,
+    retry_count           INTEGER     DEFAULT 0,
+    last_successful_stage TEXT,
+    stage_checkpoints     JSONB       DEFAULT '{}',
+    error_message         TEXT,
+    created_at            TIMESTAMPTZ DEFAULT NOW(),
+    started_at            TIMESTAMPTZ,
+    completed_at          TIMESTAMPTZ,
+    timeout_at            TIMESTAMPTZ,
+    cancelled_at          TIMESTAMPTZ,
+    metadata              JSONB       DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_jobs_document ON ingestion_jobs(document_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_tenant   ON ingestion_jobs(tenant_id, knowledge_base_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_status   ON ingestion_jobs(status);
+
+CREATE TABLE IF NOT EXISTS pipeline_checkpoints (
+    job_id                UUID        PRIMARY KEY REFERENCES ingestion_jobs(job_id) ON DELETE CASCADE,
+    last_successful_stage TEXT,
+    stage_data            JSONB       DEFAULT '{}',
+    retry_count           INTEGER     DEFAULT 0,
+    updated_at            TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS indexing_state (
+    document_id           UUID        PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
+    weaviate_status       TEXT        DEFAULT 'PENDING',
+    neo4j_status          TEXT        DEFAULT 'PENDING',
+    postgres_chunks_status TEXT       DEFAULT 'PENDING',
+    weaviate_chunk_count  INTEGER     DEFAULT 0,
+    neo4j_node_count      INTEGER     DEFAULT 0,
+    last_error            TEXT,
+    updated_at            TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS embedding_cache (
+    cache_key             TEXT        PRIMARY KEY,
+    content_hash          TEXT        NOT NULL,
+    embedding_model       TEXT        NOT NULL,
+    embedding_model_version TEXT      NOT NULL,
+    vector                JSONB       NOT NULL,
+    created_at            TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_embed_cache_hash ON embedding_cache(content_hash, embedding_model);
+
+CREATE TABLE IF NOT EXISTS knowledge_base_versions (
+    knowledge_base_id     TEXT        NOT NULL,
+    tenant_id             TEXT        NOT NULL,
+    version               INTEGER     NOT NULL DEFAULT 1,
+    document_count        INTEGER     DEFAULT 0,
+    chunk_count           INTEGER     DEFAULT 0,
+    updated_at            TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (knowledge_base_id, tenant_id)
+);
 """
 
 

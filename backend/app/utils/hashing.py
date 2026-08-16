@@ -44,3 +44,21 @@ def compute_sha256_bytes(data: bytes) -> str:
         Lowercase hexadecimal SHA-256 digest string.
     """
     return hashlib.sha256(data).hexdigest()
+
+
+def compute_content_hash(text: str) -> str:
+    """
+    Compute SHA-256 of normalized text content (Level 2 deduplication).
+    Collapses whitespace and lowercases text to ignore formatting differences.
+    """
+    import re
+    normalized = re.sub(r"\s+", " ", text.lower().strip())
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def compute_chunk_hash(content: str) -> str:
+    """
+    Compute SHA-256 of raw chunk content for chunk-level deduplication (Level 3).
+    """
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+

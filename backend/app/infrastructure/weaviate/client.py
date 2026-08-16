@@ -1,8 +1,9 @@
 """
 Weaviate Cloud infrastructure client.
-Manages connection, schema (collection) initialization, and vector upsert.
+Manages connection, schema initialization, vector upsert, and tenant-isolated searches.
 Uses weaviate-client v4 API.
 """
+import json
 from typing import Any
 
 import weaviate
@@ -84,9 +85,29 @@ class WeaviateClient:
                     description="Parent document UUID",
                 ),
                 wvc.config.Property(
+                    name="tenant_id",
+                    data_type=wvc.config.DataType.TEXT,
+                    description="Tenant ID for data isolation",
+                ),
+                wvc.config.Property(
+                    name="assistant_id",
+                    data_type=wvc.config.DataType.TEXT,
+                    description="Assistant ID",
+                ),
+                wvc.config.Property(
+                    name="knowledge_base_id",
+                    data_type=wvc.config.DataType.TEXT,
+                    description="Knowledge base ID",
+                ),
+                wvc.config.Property(
                     name="content",
                     data_type=wvc.config.DataType.TEXT,
                     description="Raw chunk text",
+                ),
+                wvc.config.Property(
+                    name="context_prefix",
+                    data_type=wvc.config.DataType.TEXT,
+                    description="Section & Document contextual prefix",
                 ),
                 wvc.config.Property(
                     name="page_number",
@@ -131,22 +152,11 @@ class WeaviateClient:
         chunks: list[Chunk],
         vectors: list[list[float]],
     ) -> None:
-        """
-        Batch-upsert chunks with pre-computed Voyage vectors.
-
-        Args:
-            chunks: Chunk objects to store.
-            vectors: Parallel list of 1024-dim embedding vectors.
-
-        Raises:
-            ValueError: If chunks and vectors lengths do not match.
-        """
+        """Batch-upsert chunks with pre-computed Voyage vectors."""
         if len(chunks) != len(vectors):
             raise ValueError(
                 f"Chunk/vector count mismatch: {len(chunks)} chunks vs {len(vectors)} vectors"
             )
-
-        import json
 
         client = self._require_client()
         collection = client.collections.get(_COLLECTION_NAME)
@@ -157,7 +167,11 @@ class WeaviateClient:
                     "chunk_id": chunk.chunk_id,
                     "parent_id": chunk.parent_id or "",
                     "document_id": str(chunk.document_id),
+                    "tenant_id": chunk.tenant_id,
+                    "assistant_id": chunk.assistant_id,
+                    "knowledge_base_id": chunk.knowledge_base_id,
                     "content": chunk.content,
+                    "context_prefix": chunk.context_prefix or "",
                     "page_number": chunk.page_number,
                     "chunk_type": chunk.chunk_type.value,
                     "industry_domain": chunk.industry_domain,
@@ -169,14 +183,90 @@ class WeaviateClient:
 
         logger.info("weaviate.chunks_upserted", count=len(chunks))
 
-    def delete_by_document(self, document_id: str) -> None:
-        """Delete all chunks belonging to a document."""
+    def delete_by_document(self, document_id: str, tenant_id: str = "default") -> None:
+        """Delete all chunks belonging to a document under tenant isolation."""
         client = self._require_client()
         collection = client.collections.get(_COLLECTION_NAME)
         collection.data.delete_many(
-            where=wvc.query.Filter.by_property("document_id").equal(document_id)
+            where=(
+                wvc.query.Filter.by_property("document_id").equal(document_id)
+                & wvc.query.Filter.by_property("tenant_id").equal(tenant_id)
+            )
         )
-        logger.info("weaviate.chunks_deleted", document_id=document_id)
+        logger.info("weaviate.chunks_deleted", document_id=document_id, tenant_id=tenant_id)
+
+    # ── Retrieval Operations ───────────────────────────────────────────────────
+
+    def vector_search(
+        self,
+        query_vector: list[float],
+        top_k: int = 10,
+        tenant_id: str = "default",
+        knowledge_base_id: str = "default",
+        permitted_access_levels: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Dense vector search filtered by tenant, knowledge_base, and access levels."""
+        client = self._require_client()
+        collection = client.collections.get(_COLLECTION_NAME)
+
+        levels = permitted_access_levels or ["PUBLIC", "INTERNAL"]
+        filters = (
+            wvc.query.Filter.by_property("tenant_id").equal(tenant_id)
+            & wvc.query.Filter.by_property("knowledge_base_id").equal(knowledge_base_id)
+            & wvc.query.Filter.by_property("access_classification").contains_any(levels)
+        )
+
+        response = collection.query.near_vector(
+            near_vector=query_vector,
+            limit=top_k,
+            filters=filters,
+            return_metadata=wvc.query.MetadataQuery(distance=True, score=True),
+        )
+
+        results: list[dict[str, Any]] = []
+        for obj in response.objects:
+            props = dict(obj.properties)
+            dist = obj.metadata.distance if obj.metadata else 1.0
+            props["score"] = 1.0 - (dist if dist is not None else 1.0)
+            results.append(props)
+
+        logger.info("weaviate.vector_search_complete", hits=len(results), tenant=tenant_id)
+        return results
+
+    def bm25_search(
+        self,
+        query_text: str,
+        top_k: int = 10,
+        tenant_id: str = "default",
+        knowledge_base_id: str = "default",
+        permitted_access_levels: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """BM25 sparse keyword search filtered by tenant and access levels."""
+        client = self._require_client()
+        collection = client.collections.get(_COLLECTION_NAME)
+
+        levels = permitted_access_levels or ["PUBLIC", "INTERNAL"]
+        filters = (
+            wvc.query.Filter.by_property("tenant_id").equal(tenant_id)
+            & wvc.query.Filter.by_property("knowledge_base_id").equal(knowledge_base_id)
+            & wvc.query.Filter.by_property("access_classification").contains_any(levels)
+        )
+
+        response = collection.query.bm25(
+            query=query_text,
+            limit=top_k,
+            filters=filters,
+            return_metadata=wvc.query.MetadataQuery(score=True),
+        )
+
+        results: list[dict[str, Any]] = []
+        for obj in response.objects:
+            props = dict(obj.properties)
+            props["score"] = obj.metadata.score if obj.metadata else 0.0
+            results.append(props)
+
+        logger.info("weaviate.bm25_search_complete", hits=len(results), tenant=tenant_id)
+        return results
 
     # ── Private helpers ────────────────────────────────────────────────────────
 

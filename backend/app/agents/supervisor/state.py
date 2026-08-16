@@ -21,8 +21,12 @@ class IngestionState(BaseModel):
 
     model_config = {"arbitrary_types_allowed": True}
 
-    # ── Identity ───────────────────────────────────────────────────────────────
+    # ── Identity & Multi-tenancy ───────────────────────────────────────────────
     document_id: UUID = Field(..., description="UUID of the document being ingested")
+    job_id: UUID | None = Field(default=None, description="UUID of the ingestion job")
+    tenant_id: str = Field(default="default", description="Tenant identifier")
+    assistant_id: str = Field(default="default", description="Assistant identifier")
+    knowledge_base_id: str = Field(default="default", description="Knowledge base identifier")
     filename: str = Field(..., description="Original filename as uploaded")
     industry: str = Field(default="manufacturing", description="Industry domain")
 
@@ -39,6 +43,9 @@ class IngestionState(BaseModel):
     sha256: str | None = Field(
         default=None, description="SHA-256 hex digest (set by step 02)"
     )
+    content_hash: str | None = Field(
+        default=None, description="Normalized content hash (set by step 02/03)"
+    )
     parsed_doc: dict | None = Field(
         default=None, description="Structured parse output from step 03"
     )
@@ -52,7 +59,26 @@ class IngestionState(BaseModel):
         default=None, description="1024-dim Voyage vectors (set by step 07)"
     )
 
-    # ── Status ─────────────────────────────────────────────────────────────────
+    # ── Resumability & Checkpointing ────────────────────────────────────────────
+    last_successful_stage: str | None = Field(default=None, description="Last completed pipeline step")
+    stage_checkpoints: dict[str, bool] = Field(default_factory=dict, description="Completed stage map")
+    retry_count: int = Field(default=0, ge=0, description="Current stage retry count")
+
+    # ── Extended Deduplication & Versioning ──────────────────────────────────
+    dup_classification: str | None = Field(default=None, description="Deduplication result classification")
+    canonical_document_id: UUID | None = Field(default=None, description="Canonical document UUID if duplicate")
+    reusable_chunk_ids: list[str] = Field(default_factory=list, description="IDs of unchanged chunks to reuse")
+    new_chunk_ids: list[str] = Field(default_factory=list, description="IDs of new/modified chunks")
+    document_version: int = Field(default=1, ge=1, description="Version number of document")
+    supersedes_document_id: UUID | None = Field(default=None, description="Prior document UUID superseded by this")
+
+    # ── Pipeline Versioning ───────────────────────────────────────────────────
+    parser_version: str = Field(default="docling-2.x")
+    chunking_version: str = Field(default="1.0")
+    embedding_model: str = Field(default="voyage-multimodal-3.5")
+    embedding_model_version: str = Field(default="3.5")
+
+    # ── Status & Control ───────────────────────────────────────────────────────
     status: DocumentStatus = Field(
         default=DocumentStatus.PENDING, description="Current pipeline status"
     )
@@ -62,3 +88,5 @@ class IngestionState(BaseModel):
     progress_percent: int = Field(
         default=0, ge=0, le=100, description="Progress 0-100"
     )
+    cancelled: bool = Field(default=False, description="Cancellation flag")
+

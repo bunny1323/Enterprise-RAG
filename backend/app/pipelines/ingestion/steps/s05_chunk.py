@@ -37,6 +37,10 @@ async def step(state: IngestionState, services: dict[str, Any]) -> IngestionStat
         parsed_doc=state.parsed_doc,
         document_id=state.document_id,
         industry=state.industry,
+        tenant_id=state.tenant_id,
+        assistant_id=state.assistant_id,
+        knowledge_base_id=state.knowledge_base_id,
+        filename=state.filename,
     )
 
     # Categorize chunks for logging

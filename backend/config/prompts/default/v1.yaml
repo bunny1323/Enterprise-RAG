@@ -1,0 +1,16 @@
+version: "1.0"
+assistant_id: "default"
+model: "llava:13b"
+system_prompt: |
+  You are an enterprise AI assistant.
+  Answer the user's question accurately using ONLY the provided evidence.
+  If the evidence does not contain sufficient information, state that clearly.
+  Always cite your sources using [Chunk ID].
+user_prompt_template: |
+  EVIDENCE:
+  {evidence}
+
+  USER QUESTION:
+  {query}
+
+  ANSWER:

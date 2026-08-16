@@ -1,0 +1,16 @@
+[
+  {
+    "question": "What is the operating hydraulic pressure limit?",
+    "expected_keywords": ["250 bar", "hydraulic pressure"],
+    "expected_document_name": "manufacturing_spec.pdf",
+    "expected_page": 12,
+    "expected_section": "Hydraulic System"
+  },
+  {
+    "question": "What is the procedure for fault code E-104?",
+    "expected_keywords": ["check wiring", "reset sensor", "E-104"],
+    "expected_document_name": "service_manual.pdf",
+    "expected_page": 45,
+    "expected_section": "Troubleshooting"
+  }
+]

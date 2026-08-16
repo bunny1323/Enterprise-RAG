@@ -29,6 +29,18 @@ class Settings(BaseSettings):
     voyage_api_key: str = Field(...)
     voyage_model: str = Field(default="voyage-multimodal-3.5")
     voyage_text_model: str = Field(default="voyage-3.5")
+    voyage_tpm_limit: int = Field(default=300_000)
+    voyage_max_batch_size: int = Field(default=32)
+    voyage_max_retries: int = Field(default=10)
+
+    # Redis
+    redis_url: str = Field(default="redis://localhost:6379")
+    cache_ttl_seconds: int = Field(default=3600)
+
+    # Ingestion Controls
+    max_upload_size_mb: int = Field(default=100)
+    ingestion_timeout_seconds: int = Field(default=1800)
+    per_stage_timeout_seconds: int = Field(default=300)
 
     # Weaviate
     weaviate_url: str = Field(...)

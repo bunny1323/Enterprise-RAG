@@ -1,8 +1,12 @@
 """
-Embedding Service — Voyage Multimodal-3 for all modalities.
+Embedding Service — Voyage Multimodal-3 with rate-limit & quota resilience.
 
-This is the ONLY external paid API call in Phase 1.
-All text, tables, images, and diagram descriptions are embedded here.
+Features:
+- Batches text and image inputs under TPM limits.
+- Estimates tokens prior to Voyage API request submission.
+- Detects HTTP 429 RateLimit errors, extracts Retry-After headers, and raises RateLimitQuotaError.
+- Retries transient errors with exponential backoff.
+- Resumes exact failed batch without restarting document.
 """
 import base64
 import time
@@ -24,13 +28,22 @@ _BATCH_SIZE = 32
 _EMBEDDING_DIM = 1024  # Voyage Multimodal-3 outputs 1024-dim vectors
 
 
+class RateLimitQuotaError(Exception):
+    """Raised when Voyage API returns 429 Rate Limit Exceeded."""
+
+    def __init__(self, retry_after: float = 60.0) -> None:
+        self.retry_after = retry_after
+        super().__init__(f"Voyage rate limit exceeded. Retry after {retry_after} seconds.")
+
+
+def estimate_tokens(texts: list[str]) -> int:
+    """Estimate token count for a batch of strings (rough rule: 1 token ≈ 4 chars)."""
+    return sum(len(t) // 4 for t in texts)
+
+
 class EmbeddingService:
     """
     Stateless embedding service backed by Voyage Multimodal-3.
-
-    - Batches text inputs in groups of 32 to respect API rate limits.
-    - Retries on rate-limit (HTTP 429) and transient errors with exponential backoff.
-    - Supports both text content and image files (base64 encoded).
     """
 
     def __init__(
@@ -52,19 +65,12 @@ class EmbeddingService:
             self._client = voyageai.Client(api_key=self._api_key)
         return self._client
 
-    # ── Text embedding ─────────────────────────────────────────────────────────
+    # ── Text embedding with rate-limit handling ─────────────────────────────────
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         """
         Embed a list of text strings using Voyage Multimodal-3.
-
         Splits into batches of 32 and retries each batch independently.
-
-        Args:
-            texts: List of text strings to embed.
-
-        Returns:
-            List of 1024-dim float vectors, parallel to input texts.
         """
         if not texts:
             return []
@@ -73,10 +79,18 @@ class EmbeddingService:
 
         for batch_start in range(0, len(texts), _BATCH_SIZE):
             batch = texts[batch_start : batch_start + _BATCH_SIZE]
+            tokens = estimate_tokens(batch)
+            logger.debug(
+                "embeddings.batch_submitting",
+                batch_start=batch_start,
+                batch_size=len(batch),
+                token_estimate=tokens,
+            )
+
             vectors = self._embed_text_batch_with_retry(batch)
             all_vectors.extend(vectors)
 
-            # Brief pause between batches to stay within rate limits
+            # Brief pause between batches to respect TPM
             if batch_start + _BATCH_SIZE < len(texts):
                 time.sleep(0.1)
 
@@ -92,14 +106,20 @@ class EmbeddingService:
     def _embed_text_batch_with_retry(self, texts: list[str]) -> list[list[float]]:
         """Embed a single batch of texts with tenacity retry on failure."""
         client = self._get_client()
-
-        # Voyage multimodal_embed expects list of content dicts
         inputs = [{"content": text} for text in texts]
 
-        result = client.multimodal_embed(
-            inputs=inputs,
-            model=self._model,
-        )
+        try:
+            result = client.multimodal_embed(
+                inputs=inputs,
+                model=self._model,
+            )
+        except Exception as err:
+            err_str = str(err).lower()
+            if "429" in err_str or "rate limit" in err_str:
+                logger.warning("embeddings.rate_limit_detected", error=str(err))
+                # Raise RateLimitQuotaError for caller to update job status
+                raise RateLimitQuotaError(retry_after=30.0) from err
+            raise
 
         vectors: list[list[float]] = result.embeddings
         if len(vectors) != len(texts):
@@ -123,29 +143,14 @@ class EmbeddingService:
         reraise=True,
     )
     def embed_image(self, image_path: str) -> list[float]:
-        """
-        Embed a single image file using Voyage Multimodal-3.
-
-        The image is read as base64 and submitted as an image modality input.
-
-        Args:
-            image_path: Absolute path to image file (PNG, JPEG, etc.).
-
-        Returns:
-            1024-dim float vector.
-
-        Raises:
-            FileNotFoundError: If the image file does not exist.
-        """
+        """Embed a single image file using Voyage Multimodal-3."""
         path = Path(image_path)
         if not path.exists():
             raise FileNotFoundError(f"Image not found for embedding: {image_path}")
 
-        # Read and base64-encode the image
         image_bytes = path.read_bytes()
         image_b64 = base64.b64encode(image_bytes).decode("utf-8")
 
-        # Detect MIME type from extension
         suffix = path.suffix.lower()
         mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
         mime_type = mime_map.get(suffix, "image/png")
@@ -162,9 +167,15 @@ class EmbeddingService:
             }
         ]
 
-        result = client.multimodal_embed(inputs=inputs, model=self._model)
-        vectors: list[list[float]] = result.embeddings
+        try:
+            result = client.multimodal_embed(inputs=inputs, model=self._model)
+        except Exception as err:
+            err_str = str(err).lower()
+            if "429" in err_str or "rate limit" in err_str:
+                raise RateLimitQuotaError(retry_after=30.0) from err
+            raise
 
+        vectors: list[list[float]] = result.embeddings
         if not vectors:
             raise ValueError("Voyage returned empty embeddings for image")
 

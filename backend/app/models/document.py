@@ -13,13 +13,23 @@ class DocumentStatus(str, Enum):
     """Lifecycle states for a document moving through the ingestion pipeline."""
 
     PENDING = "PENDING"
+    RECEIVED = "RECEIVED"
     VALIDATING = "VALIDATING"
+    CHECKING_DUPLICATE = "CHECKING_DUPLICATE"
     PARSING = "PARSING"
+    OCR = "OCR"
+    VISION = "VISION"
     CHUNKING = "CHUNKING"
+    METADATA = "METADATA"
     EMBEDDING = "EMBEDDING"
+    WAITING_FOR_EMBEDDING_QUOTA = "WAITING_FOR_EMBEDDING_QUOTA"
     INDEXING = "INDEXING"
+    PARTIAL = "PARTIAL"
+    DUPLICATE = "DUPLICATE"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+    QUARANTINED = "QUARANTINED"
 
 
 class Document(BaseModel):
@@ -28,13 +38,23 @@ class Document(BaseModel):
     model_config = {"from_attributes": True}
 
     id: UUID = Field(default_factory=uuid4, description="Primary key — UUID v4")
-    sha256: str = Field(..., description="SHA-256 hex digest of raw file bytes (deduplication key)")
+    sha256: str = Field(..., description="SHA-256 hex digest of raw file bytes")
     file_name: str = Field(..., description="Original uploaded filename")
     storage_path: str = Field(..., description="Absolute local path to raw file")
     industry: str = Field(
         default="manufacturing", description="Industry domain for metadata enrichment"
     )
-    page_count: int | None = Field(default=None, description="Number of pages (set after parsing)")
+    tenant_id: str = Field(default="default", description="Tenant identifier")
+    assistant_id: str = Field(default="default", description="Assistant identifier")
+    knowledge_base_id: str = Field(default="default", description="Knowledge base identifier")
+    content_hash: str | None = Field(default=None, description="Normalized content hash")
+    version: int = Field(default=1, ge=1, description="Document version number")
+    canonical_document_id: UUID | None = Field(default=None, description="Canonical document ID if duplicate")
+    supersedes: UUID | None = Field(default=None, description="Prior document ID superseded by this")
+    parser_version: str | None = Field(default=None, description="Parser version used")
+    embedding_model: str | None = Field(default=None, description="Embedding model used")
+    embedding_model_version: str | None = Field(default=None, description="Embedding model version")
+    page_count: int | None = Field(default=None, description="Number of pages")
     status: DocumentStatus = Field(
         default=DocumentStatus.PENDING, description="Current pipeline status"
     )
@@ -42,7 +62,7 @@ class Document(BaseModel):
         default=0, ge=0, le=100, description="Ingestion progress 0-100"
     )
     metadata: dict = Field(
-        default_factory=dict, description="Arbitrary metadata from parsing and enrichment"
+        default_factory=dict, description="Arbitrary metadata"
     )
     created_at: datetime = Field(
         default_factory=datetime.utcnow, description="Record creation timestamp (UTC)"

@@ -1,0 +1,46 @@
+# Jarvis Ignore File — files hidden from the AI
+# Auto-generated — can be edited manually
+
+# Environment and secrets
+.env
+.env.*
+*.env
+!.env.example
+
+# Dependencies
+node_modules/
+vendor/
+bower_components/
+
+# Build artifacts
+dist/
+build/
+out/
+
+# Cache and temp files
+.cache/
+.tmp/
+*.tmp
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+
+# Security
+*.pem
+*.key
+*.crt
+*.pfx
+secrets/
+credentials/
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Jarvis internals
+.jarvis/
+.jarvisignore
+jarvis-*.json

@@ -34,6 +34,14 @@ class Chunk(BaseModel):
         description="[x0, y0, x1, y1] normalized bounding box on page",
     )
     chunk_type: ChunkType = Field(default=ChunkType.TEXT, description="Semantic content type")
+    tenant_id: str = Field(default="default", description="Tenant identifier")
+    assistant_id: str = Field(default="default", description="Assistant identifier")
+    knowledge_base_id: str = Field(default="default", description="Knowledge base identifier")
+    content_hash: str | None = Field(default=None, description="Deterministic hash of chunk content")
+    section: str | None = Field(default=None, description="Section heading")
+    subsection: str | None = Field(default=None, description="Subsection heading")
+    context_prefix: str | None = Field(default=None, description="Document + Section contextual prefix")
+    embedding_representation: str = Field(default="text", description="Representation type (text | image | text_summary_of_image)")
     access_classification: str = Field(
         default="INTERNAL",
         description="Security classification (PUBLIC | INTERNAL | RESTRICTED)",
