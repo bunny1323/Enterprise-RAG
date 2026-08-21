@@ -47,7 +47,7 @@ Perfect for organizations that need explainable, auditable AI responses.
 ## Quick Start
 
 ### Requirements
-- Python 3.10+
+- Python 3.11+
 - Docker (optional)
 - API keys: LLM provider (OpenAI, Groq, etc.) and embeddings (Voyage AI, etc.)
 

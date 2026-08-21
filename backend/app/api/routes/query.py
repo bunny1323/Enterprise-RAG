@@ -6,7 +6,7 @@ POST /api/v1/search — Raw search endpoint (Retrieval only)
 import time
 import uuid
 from typing import Annotated
-
+from app.infrastructure.postgres.client import PostgresClient
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.agents.retrieval.agent import RetrievalAgent
@@ -40,6 +40,9 @@ from app.services.retrieval.bm25_search import BM25SearchService
 from app.services.retrieval.dense_search import DenseSearchService
 from app.services.retrieval.graph_search import GraphSearchService
 from app.services.retrieval.reranking import VoyageRerankService
+from app.agents.query_workflow.nodes import QueryNodes
+from app.agents.query_workflow.graph import build_query_graph
+from app.agents.query_workflow.state import QueryWorkflowState
 
 logger = get_logger(__name__)
 
@@ -73,25 +76,11 @@ async def chat_query(
 
     logger.info("chat.request_received", trace_id=trace_id, query=body.query[:50], tenant=tenant_ctx.tenant_id)
 
-    # 1. OPA Policy Evaluation
+    # 1. Initialize dependencies
     opa_client: OPAClient = getattr(request.app.state, "opa", OPAClient())
-    policy_decision = await opa_client.evaluate_retrieval_policy(tenant_ctx)
-    if not policy_decision.allowed:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Access denied by policy: {policy_decision.denied_reason or 'Unauthorized'}",
-        )
-
-    # 2. Check Security-Aware Cache
     redis_client: RedisClient | None = getattr(request.app.state, "redis", None)
-    if redis_client:
-        cache_svc = CacheService(redis_client, postgres)
-        cached_resp = await cache_svc.get_response(tenant_ctx, body.query)
-        if cached_resp:
-            cached_resp["latency_ms"] = int((time.time() - start_time) * 1000)
-            return QueryResponse(**cached_resp)
-
-    # 3. Initialize Retrieval Agent components from app state
+    cache_svc = CacheService(redis_client, postgres) if redis_client else None
+    
     embedder: EmbeddingService = request.app.state.embedder
     dense_svc = DenseSearchService(request.app.state.weaviate)
     bm25_svc = BM25SearchService(request.app.state.weaviate)
@@ -108,43 +97,67 @@ async def chat_query(
         reranker=reranker,
         normalizer=normalizer,
         confidence_svc=confidence_svc,
+        cache_svc=cache_svc,
     )
+    
+    llm_provider: OllamaProvider = request.app.state.llm_provider
+    citation_svc = CitationService()
+    verifier = GroundednessVerificationService()
 
-    # 4. Execute Retrieval
-    initial_qstate = QueryState(
+    # 2. Build LangGraph Nodes & Graph
+    nodes = QueryNodes(
+        retrieval_agent=retrieval_agent,
+        llm_provider=llm_provider,
+        citation_svc=citation_svc,
+        verifier_svc=verifier,
+        opa_client=opa_client,
+        cache_svc=cache_svc,
+    )
+    graph = build_query_graph(nodes)
+
+    # 3. Initialize State
+    initial_state = QueryWorkflowState(
         query=body.query,
         tenant_context=tenant_ctx,
         top_k=body.top_k,
+        intent="",
+        permitted_access_levels=[],
+        cache_hit=False,
+        retrieval_strategy="",
+        dense_results=[],
+        bm25_results=[],
+        graph_results=[],
+        fused_results=[],
+        reranked_results=[],
+        confidence_level="LOW",
+        confidence_score=0.0,
+        retries=0,
+        answer="",
+        citations=[],
+        sources=[],
+        verification_status="UNSUPPORTED",
+        trace_id=trace_id,
+        latency_ms=0,
+        error_message=None
     )
 
-    retrieved_state = await retrieval_agent.retrieve(
-        query_state=initial_qstate,
-        permitted_access_levels=policy_decision.permitted_access_levels,
-    )
+    # 4. Execute LangGraph Workflow
+    final_state = await graph.ainvoke(initial_state)
 
-    evidence = retrieved_state.reranked_results
-
-    # 5. Generate Grounded Response via LLM Provider
-    llm_provider: OllamaProvider = request.app.state.llm_provider
-    gen_result = await llm_provider.generate(
-        prompt=body.query,
-        evidence=evidence,
-    )
-
-    # 6. Map Citations & Verify Groundedness
-    citation_svc = CitationService()
-    citations, sources = citation_svc.map_citations(gen_result.answer, evidence)
-
-    verifier = GroundednessVerificationService()
-    groundedness = verifier.verify(gen_result.answer, evidence)
+    if final_state.get("error_message"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=final_state["error_message"],
+        )
 
     latency_ms = int((time.time() - start_time) * 1000)
-
+    
+    # 5. Format Response
     response_data = QueryResponse(
-        answer=gen_result.answer,
-        citations=citations,
-        confidence=retrieved_state.confidence_level,
-        confidence_score=retrieved_state.confidence_score,
+        answer=final_state["answer"],
+        citations=final_state["citations"],
+        confidence=final_state["confidence_level"],
+        confidence_score=final_state["confidence_score"],
         evidence=[
             EvidenceSnippet(
                 chunk_id=item.chunk_id,
@@ -152,19 +165,14 @@ async def chat_query(
                 page_number=item.page_number,
                 score=item.score,
             )
-            for item in evidence
+            for item in final_state["reranked_results"]
         ],
-        sources=sources,
-        verification_status=groundedness.verification_status,
+        sources=final_state["sources"],
+        verification_status=final_state["verification_status"],
         trace_id=trace_id,
-        retrieval_strategy=retrieved_state.strategy_used,
+        retrieval_strategy=final_state["retrieval_strategy"],
         latency_ms=latency_ms,
     )
-
-    # 7. Store in Cache
-    if redis_client:
-        cache_svc = CacheService(redis_client, postgres)
-        await cache_svc.set_response(tenant_ctx, body.query, response_data.model_dump())
 
     logger.info("chat.request_complete", trace_id=trace_id, latency_ms=latency_ms)
     return response_data
@@ -183,6 +191,9 @@ async def raw_search(
 ) -> dict:
     """Execute retrieval and reranking, returning raw SearchResult items."""
     start_time = time.time()
+    redis_client: RedisClient | None = getattr(request.app.state, "redis", None)
+    cache_svc = CacheService(redis_client, postgres) if redis_client else None
+
     embedder: EmbeddingService = request.app.state.embedder
     dense_svc = DenseSearchService(request.app.state.weaviate)
     bm25_svc = BM25SearchService(request.app.state.weaviate)
@@ -199,6 +210,7 @@ async def raw_search(
         reranker=reranker,
         normalizer=normalizer,
         confidence_svc=confidence_svc,
+        cache_svc=cache_svc,
     )
 
     initial_qstate = QueryState(

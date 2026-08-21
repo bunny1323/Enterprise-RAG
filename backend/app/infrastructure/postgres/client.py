@@ -13,7 +13,7 @@ from app.config.logging import get_logger
 logger = get_logger(__name__)
 
 # ── DDL ────────────────────────────────────────────────────────────────────────
-_SCHEMA_SQL = """
+_BASE_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS documents (
     id                    UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     sha256                TEXT        NOT NULL,
@@ -39,11 +39,6 @@ CREATE TABLE IF NOT EXISTS documents (
     error_message         TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_docs_sha256 ON documents(sha256);
-CREATE INDEX IF NOT EXISTS idx_docs_status  ON documents(status);
-CREATE INDEX IF NOT EXISTS idx_docs_tenant  ON documents(tenant_id, knowledge_base_id);
-CREATE INDEX IF NOT EXISTS idx_docs_content_hash ON documents(content_hash);
-
 CREATE TABLE IF NOT EXISTS chunks (
     chunk_id              TEXT        PRIMARY KEY,
     parent_id             TEXT,
@@ -67,11 +62,6 @@ CREATE TABLE IF NOT EXISTS chunks (
     created_at            TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_chunks_document ON chunks(document_id);
-CREATE INDEX IF NOT EXISTS idx_chunks_type     ON chunks(chunk_type);
-CREATE INDEX IF NOT EXISTS idx_chunks_tenant   ON chunks(tenant_id, knowledge_base_id);
-CREATE INDEX IF NOT EXISTS idx_chunks_content_hash ON chunks(content_hash);
-
 CREATE TABLE IF NOT EXISTS ingestion_jobs (
     job_id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     document_id           UUID        REFERENCES documents(id) ON DELETE CASCADE,
@@ -92,10 +82,6 @@ CREATE TABLE IF NOT EXISTS ingestion_jobs (
     cancelled_at          TIMESTAMPTZ,
     metadata              JSONB       DEFAULT '{}'
 );
-
-CREATE INDEX IF NOT EXISTS idx_jobs_document ON ingestion_jobs(document_id);
-CREATE INDEX IF NOT EXISTS idx_jobs_tenant   ON ingestion_jobs(tenant_id, knowledge_base_id);
-CREATE INDEX IF NOT EXISTS idx_jobs_status   ON ingestion_jobs(status);
 
 CREATE TABLE IF NOT EXISTS pipeline_checkpoints (
     job_id                UUID        PRIMARY KEY REFERENCES ingestion_jobs(job_id) ON DELETE CASCADE,
@@ -125,8 +111,6 @@ CREATE TABLE IF NOT EXISTS embedding_cache (
     created_at            TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_embed_cache_hash ON embedding_cache(content_hash, embedding_model);
-
 CREATE TABLE IF NOT EXISTS knowledge_base_versions (
     knowledge_base_id     TEXT        NOT NULL,
     tenant_id             TEXT        NOT NULL,
@@ -138,6 +122,23 @@ CREATE TABLE IF NOT EXISTS knowledge_base_versions (
 );
 """
 
+_INDEXES_SQL = """
+CREATE INDEX IF NOT EXISTS idx_docs_sha256 ON documents(sha256);
+CREATE INDEX IF NOT EXISTS idx_docs_status  ON documents(status);
+CREATE INDEX IF NOT EXISTS idx_docs_tenant  ON documents(tenant_id, knowledge_base_id);
+CREATE INDEX IF NOT EXISTS idx_docs_content_hash ON documents(content_hash);
+
+CREATE INDEX IF NOT EXISTS idx_chunks_document ON chunks(document_id);
+CREATE INDEX IF NOT EXISTS idx_chunks_type     ON chunks(chunk_type);
+CREATE INDEX IF NOT EXISTS idx_chunks_tenant   ON chunks(tenant_id, knowledge_base_id);
+CREATE INDEX IF NOT EXISTS idx_chunks_content_hash ON chunks(content_hash);
+
+CREATE INDEX IF NOT EXISTS idx_jobs_document ON ingestion_jobs(document_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_tenant   ON ingestion_jobs(tenant_id, knowledge_base_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_status   ON ingestion_jobs(status);
+
+CREATE INDEX IF NOT EXISTS idx_embed_cache_hash ON embedding_cache(content_hash, embedding_model);
+"""
 
 class PostgresClient:
     """Async PostgreSQL client backed by an asyncpg connection pool."""
@@ -178,9 +179,63 @@ class PostgresClient:
         )
 
     async def init_schema(self) -> None:
-        """Create tables and indexes if they do not already exist."""
-        await self.execute(_SCHEMA_SQL)
+        """Create tables and indexes safely, supporting older existing schemas.
+        
+        The execution order is critical:
+        1. Initialize base tables.
+        2. Apply column migrations (adding missing columns to old tables).
+        3. Create indexes that may depend on the newly added columns.
+        """
+        await self._initialize_base_schema()
+        await self._apply_column_migrations()
+        await self._apply_indexes_and_constraints()
         logger.info("postgres.schema_initialized")
+        
+    async def _initialize_base_schema(self) -> None:
+        """Create tables if they do not exist."""
+        await self.execute(_BASE_TABLES_SQL)
+
+    async def _apply_indexes_and_constraints(self) -> None:
+        """Create indexes and constraints, which may depend on migrated columns."""
+        await self.execute(_INDEXES_SQL)
+
+    async def _apply_column_migrations(self) -> None:
+        """
+        Idempotent column migrations using ALTER TABLE ... ADD COLUMN IF NOT EXISTS.
+
+        Runs after CREATE TABLE IF NOT EXISTS so existing tables from earlier
+        schema versions get all new columns without data loss.
+        """
+        migrations = [
+            # ── documents table ───────────────────────────────────────────────
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'",
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS assistant_id TEXT NOT NULL DEFAULT 'default'",
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS knowledge_base_id TEXT NOT NULL DEFAULT 'default'",
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS content_hash TEXT",
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS version INTEGER DEFAULT 1",
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS canonical_document_id UUID",
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS supersedes UUID",
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS parser_version TEXT",
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS embedding_model TEXT",
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS embedding_model_version TEXT",
+            # ── chunks table ─────────────────────────────────────────────────
+            "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'",
+            "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS assistant_id TEXT NOT NULL DEFAULT 'default'",
+            "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS knowledge_base_id TEXT NOT NULL DEFAULT 'default'",
+            "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS content_hash TEXT",
+            "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS embedding_representation TEXT DEFAULT 'text'",
+            # ── ingestion_jobs table ─────────────────────────────────────────
+            "ALTER TABLE ingestion_jobs ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'",
+            "ALTER TABLE ingestion_jobs ADD COLUMN IF NOT EXISTS assistant_id TEXT NOT NULL DEFAULT 'default'",
+            "ALTER TABLE ingestion_jobs ADD COLUMN IF NOT EXISTS knowledge_base_id TEXT NOT NULL DEFAULT 'default'",
+        ]
+        for sql in migrations:
+            try:
+                await self.execute(sql)
+            except Exception as err:
+                # Log but don't fail — some may already exist or have different types
+                logger.warning("postgres.migration_warning", sql=sql[:80], error=str(err))
+        logger.info("postgres.column_migrations_applied")
 
     async def close(self) -> None:
         """Drain and close the connection pool."""

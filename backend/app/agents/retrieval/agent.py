@@ -3,8 +3,10 @@ Retrieval Agent.
 Orchestrates multi-channel retrieval (Dense + BM25 + Graph), fusion via RRF, and reranking.
 Calls stateless services — does not reimplement business logic directly.
 """
+import asyncio
 from app.agents.retrieval.state import QueryState
 from app.config.logging import get_logger
+from app.services.cache.service import CacheService
 from app.services.confidence.service import ConfidenceScoringService
 from app.services.embeddings.service import EmbeddingService
 from app.services.query.normalization import QueryNormalizationService
@@ -31,6 +33,7 @@ class RetrievalAgent:
         reranker: VoyageRerankService,
         normalizer: QueryNormalizationService,
         confidence_svc: ConfidenceScoringService,
+        cache_svc: CacheService | None = None,
     ) -> None:
         self._embedder = embedder
         self._dense_svc = dense_svc
@@ -39,6 +42,7 @@ class RetrievalAgent:
         self._reranker = reranker
         self._normalizer = normalizer
         self._confidence_svc = confidence_svc
+        self._cache_svc = cache_svc
 
     async def retrieve(
         self,
@@ -59,35 +63,64 @@ class RetrievalAgent:
             tenant=ctx.tenant_id,
         )
 
-        # 1. Generate query embedding
-        query_vectors = self._embedder.embed_batch([norm.clean_query])
-        query_vec = query_vectors[0] if query_vectors else []
+        # 1. Generate query embedding (with caching)
+        query_vec = None
+        if self._cache_svc:
+            query_vec = await self._cache_svc.get_query_embedding(ctx, norm.clean_query)
+
+        if not query_vec:
+            # Need to run in executor since embedder is sync under the hood in Voyage client
+            loop = asyncio.get_event_loop()
+            query_vectors = await loop.run_in_executor(None, self._embedder.embed_batch, [norm.clean_query])
+            query_vec = query_vectors[0] if query_vectors else []
+            if query_vec and self._cache_svc:
+                await self._cache_svc.set_query_embedding(ctx, norm.clean_query, query_vec)
 
         # 2. Parallel retrieval channels
-        dense_results = await self._dense_svc.search(
-            query_vector=query_vec,
-            top_k=query_state.top_k * 2,
-            tenant_id=ctx.tenant_id,
-            knowledge_base_id=ctx.knowledge_base_id,
-            permitted_access_levels=permitted_access_levels,
-        )
+        tasks = {
+            "dense": self._dense_svc.search(
+                query_vector=query_vec,
+                top_k=query_state.top_k * 2,
+                tenant_id=ctx.tenant_id,
+                knowledge_base_id=ctx.knowledge_base_id,
+                permitted_access_levels=permitted_access_levels,
+            ),
+            "bm25": self._bm25_svc.search(
+                query_text=norm.clean_query,
+                top_k=query_state.top_k * 2,
+                tenant_id=ctx.tenant_id,
+                knowledge_base_id=ctx.knowledge_base_id,
+                permitted_access_levels=permitted_access_levels,
+            )
+        }
 
-        bm25_results = await self._bm25_svc.search(
-            query_text=norm.clean_query,
-            top_k=query_state.top_k * 2,
-            tenant_id=ctx.tenant_id,
-            knowledge_base_id=ctx.knowledge_base_id,
-            permitted_access_levels=permitted_access_levels,
-        )
-
-        graph_results = []
         if intent in ("RELATIONSHIP", "TECHNICAL"):
             entity_query = norm.extracted_entities[0] if norm.extracted_entities else norm.clean_query[:30]
-            graph_results = await self._graph_svc.search(
+            tasks["graph"] = self._graph_svc.search(
                 entity_name=entity_query,
                 tenant_id=ctx.tenant_id,
                 knowledge_base_id=ctx.knowledge_base_id,
             )
+
+        # Execute concurrently and handle exceptions safely
+        results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+
+        dense_results = []
+        bm25_results = []
+        graph_results = []
+
+        for i, key in enumerate(tasks.keys()):
+            res = results[i]
+            if isinstance(res, Exception):
+                logger.error(f"retrieval_agent.{key}_failed", error=str(res))
+                continue
+
+            if key == "dense":
+                dense_results = res
+            elif key == "bm25":
+                bm25_results = res
+            elif key == "graph":
+                graph_results = res
 
         # 3. Fuse results via RRF
         channel_lists = [dense_results, bm25_results]
