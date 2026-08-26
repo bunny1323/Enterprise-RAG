@@ -1,48 +1,48 @@
 """
 Query and Chat API Routes.
-POST /api/v1/chat   — Grounded RAG conversational endpoint (Retrieval + Generation + Citations)
+POST /api/v1/chat   — Grounded RAG conversational endpoint
+(Retrieval + Generation + Citations)
 POST /api/v1/search — Raw search endpoint (Retrieval only)
 """
+
 import time
 import uuid
-from typing import Annotated
-from app.infrastructure.postgres.client import PostgresClient
-from fastapi import APIRouter, Depends, HTTPException, Request, status
 
+from fastapi import APIRouter, HTTPException, Request, status
+
+from app.agents.query_workflow.graph import build_query_graph
+from app.agents.query_workflow.nodes import QueryNodes
+from app.agents.query_workflow.state import QueryWorkflowState
 from app.agents.retrieval.agent import RetrievalAgent
 from app.agents.retrieval.state import QueryState
 from app.api.dependencies import (
     PostgresDep,
     SettingsDep,
     TenantContextDep,
-    get_opa,
-    get_redis,
 )
 from app.config.logging import get_logger
-from app.infrastructure.opa.client import OPAClient
 from app.infrastructure.redis.client import RedisClient
 from app.models.query import (
-    Citation,
     EvidenceSnippet,
     QueryRequest,
     QueryResponse,
-    SourceRef,
 )
-from app.models.tenant import TenantContext
 from app.services.cache.service import CacheService
 from app.services.confidence.service import ConfidenceScoringService
 from app.services.embeddings.service import EmbeddingService
 from app.services.generation.citations import CitationService
-from app.services.generation.hallucination import GroundednessVerificationService
+from app.services.generation.hallucination import (
+    GroundednessVerificationService,
+)
 from app.services.generation.llm import OllamaProvider
 from app.services.query.normalization import QueryNormalizationService
 from app.services.retrieval.bm25_search import BM25SearchService
 from app.services.retrieval.dense_search import DenseSearchService
 from app.services.retrieval.graph_search import GraphSearchService
+from app.services.retrieval.hierarchical import (
+    HierarchicalRetrievalService,
+)
 from app.services.retrieval.reranking import VoyageRerankService
-from app.agents.query_workflow.nodes import QueryNodes
-from app.agents.query_workflow.graph import build_query_graph
-from app.agents.query_workflow.state import QueryWorkflowState
 
 logger = get_logger(__name__)
 
@@ -63,31 +63,74 @@ async def chat_query(
 ) -> QueryResponse:
     """
     Full Enterprise RAG query execution pipeline:
+
     1. Authenticate identity / TenantContext
-    2. Evaluate OPA policy decision for permitted filters
+    2. Evaluate OPA policy decision
     3. Check security-aware cache
-    4. Execute RetrievalAgent (Dense + BM25 + Graph + RRF + Rerank)
-    5. Score confidence & generate answer via LLM
-    6. Map citations & verify groundedness
+    4. Execute RetrievalAgent
+       (Dense + BM25 + Graph + RRF + Rerank + Hierarchical Retrieval)
+    5. Score confidence and generate answer via LLM
+    6. Map citations and verify groundedness
     7. Cache response and return QueryResponse
     """
+
     start_time = time.time()
     trace_id = f"tr_{uuid.uuid4().hex[:12]}"
 
-    logger.info("chat.request_received", trace_id=trace_id, query=body.query[:50], tenant=tenant_ctx.tenant_id)
+    logger.info(
+        "chat.request_received",
+        trace_id=trace_id,
+        query=body.query[:50],
+        tenant=tenant_ctx.tenant_id,
+    )
 
+    # --------------------------------------------------
     # 1. Initialize dependencies
-    opa_client: OPAClient = getattr(request.app.state, "opa", OPAClient())
-    redis_client: RedisClient | None = getattr(request.app.state, "redis", None)
-    cache_svc = CacheService(redis_client, postgres) if redis_client else None
-    
+    # --------------------------------------------------
+
+    redis_client: RedisClient | None = getattr(
+        request.app.state,
+        "redis",
+        None,
+    )
+
+    cache_svc = (
+        CacheService(redis_client, postgres)
+        if redis_client
+        else None
+    )
+
     embedder: EmbeddingService = request.app.state.embedder
-    dense_svc = DenseSearchService(request.app.state.weaviate)
-    bm25_svc = BM25SearchService(request.app.state.weaviate)
-    graph_svc = GraphSearchService(request.app.state.neo4j, postgres)
-    reranker = VoyageRerankService(settings.voyage_api_key)
+
+    dense_svc = DenseSearchService(
+        request.app.state.weaviate
+    )
+
+    bm25_svc = BM25SearchService(
+        request.app.state.weaviate
+    )
+
+    graph_svc = GraphSearchService(
+        request.app.state.neo4j,
+        postgres,
+    )
+
+    # NEW: Hierarchical retrieval service
+    hierarchical_svc = HierarchicalRetrievalService(
+        postgres
+    )
+
+    reranker = VoyageRerankService(
+        settings.voyage_api_key
+    )
+
     normalizer = QueryNormalizationService()
+
     confidence_svc = ConfidenceScoringService()
+
+    # --------------------------------------------------
+    # 2. Create Retrieval Agent
+    # --------------------------------------------------
 
     retrieval_agent = RetrievalAgent(
         embedder=embedder,
@@ -97,25 +140,45 @@ async def chat_query(
         reranker=reranker,
         normalizer=normalizer,
         confidence_svc=confidence_svc,
+        hierarchical_svc=hierarchical_svc,
         cache_svc=cache_svc,
     )
-    
-    llm_provider: OllamaProvider = request.app.state.llm_provider
+
+    # --------------------------------------------------
+    # 3. Generation dependencies
+    # --------------------------------------------------
+
+    llm_provider: OllamaProvider = (
+        request.app.state.llm_provider
+    )
+
     citation_svc = CitationService()
+
     verifier = GroundednessVerificationService()
 
-    # 2. Build LangGraph Nodes & Graph
+    # --------------------------------------------------
+    # 4. Build LangGraph Nodes and Graph
+    # --------------------------------------------------
+
     nodes = QueryNodes(
         retrieval_agent=retrieval_agent,
         llm_provider=llm_provider,
         citation_svc=citation_svc,
         verifier_svc=verifier,
-        opa_client=opa_client,
+        opa_client=getattr(
+            request.app.state,
+            "opa",
+            None,
+        ),
         cache_svc=cache_svc,
     )
+
     graph = build_query_graph(nodes)
 
-    # 3. Initialize State
+    # --------------------------------------------------
+    # 5. Initialize workflow state
+    # --------------------------------------------------
+
     initial_state = QueryWorkflowState(
         query=body.query,
         tenant_context=tenant_ctx,
@@ -138,11 +201,16 @@ async def chat_query(
         verification_status="UNSUPPORTED",
         trace_id=trace_id,
         latency_ms=0,
-        error_message=None
+        error_message=None,
     )
 
-    # 4. Execute LangGraph Workflow
-    final_state = await graph.ainvoke(initial_state)
+    # --------------------------------------------------
+    # 6. Execute LangGraph workflow
+    # --------------------------------------------------
+
+    final_state = await graph.ainvoke(
+        initial_state
+    )
 
     if final_state.get("error_message"):
         raise HTTPException(
@@ -150,9 +218,14 @@ async def chat_query(
             detail=final_state["error_message"],
         )
 
-    latency_ms = int((time.time() - start_time) * 1000)
-    
-    # 5. Format Response
+    latency_ms = int(
+        (time.time() - start_time) * 1000
+    )
+
+    # --------------------------------------------------
+    # 7. Format response
+    # --------------------------------------------------
+
     response_data = QueryResponse(
         answer=final_state["answer"],
         citations=final_state["citations"],
@@ -168,13 +241,22 @@ async def chat_query(
             for item in final_state["reranked_results"]
         ],
         sources=final_state["sources"],
-        verification_status=final_state["verification_status"],
+        verification_status=final_state[
+            "verification_status"
+        ],
         trace_id=trace_id,
-        retrieval_strategy=final_state["retrieval_strategy"],
+        retrieval_strategy=final_state[
+            "retrieval_strategy"
+        ],
         latency_ms=latency_ms,
     )
 
-    logger.info("chat.request_complete", trace_id=trace_id, latency_ms=latency_ms)
+    logger.info(
+        "chat.request_complete",
+        trace_id=trace_id,
+        latency_ms=latency_ms,
+    )
+
     return response_data
 
 
@@ -187,20 +269,73 @@ async def raw_search(
     body: QueryRequest,
     tenant_ctx: TenantContextDep,
     settings: SettingsDep,
-    postgres: PostgresClient = Depends(PostgresDep),
+    postgres: PostgresDep,
 ) -> dict:
-    """Execute retrieval and reranking, returning raw SearchResult items."""
+    """
+    Execute multi-channel retrieval and reranking.
+
+    Pipeline:
+
+    Dense + BM25 + Graph
+            ↓
+           RRF
+            ↓
+         Reranker
+            ↓
+    Hierarchical Expansion
+            ↓
+      Confidence Scoring
+    """
+
     start_time = time.time()
-    redis_client: RedisClient | None = getattr(request.app.state, "redis", None)
-    cache_svc = CacheService(redis_client, postgres) if redis_client else None
+
+    # --------------------------------------------------
+    # 1. Initialize dependencies
+    # --------------------------------------------------
+
+    redis_client: RedisClient | None = getattr(
+        request.app.state,
+        "redis",
+        None,
+    )
+
+    cache_svc = (
+        CacheService(redis_client, postgres)
+        if redis_client
+        else None
+    )
 
     embedder: EmbeddingService = request.app.state.embedder
-    dense_svc = DenseSearchService(request.app.state.weaviate)
-    bm25_svc = BM25SearchService(request.app.state.weaviate)
-    graph_svc = GraphSearchService(request.app.state.neo4j, postgres)
-    reranker = VoyageRerankService(settings.voyage_api_key)
+
+    dense_svc = DenseSearchService(
+        request.app.state.weaviate
+    )
+
+    bm25_svc = BM25SearchService(
+        request.app.state.weaviate
+    )
+
+    graph_svc = GraphSearchService(
+        request.app.state.neo4j,
+        postgres,
+    )
+
+    # NEW: Hierarchical retrieval service
+    hierarchical_svc = HierarchicalRetrievalService(
+        postgres
+    )
+
+    reranker = VoyageRerankService(
+        settings.voyage_api_key
+    )
+
     normalizer = QueryNormalizationService()
+
     confidence_svc = ConfidenceScoringService()
+
+    # --------------------------------------------------
+    # 2. Create Retrieval Agent
+    # --------------------------------------------------
 
     retrieval_agent = RetrievalAgent(
         embedder=embedder,
@@ -210,8 +345,13 @@ async def raw_search(
         reranker=reranker,
         normalizer=normalizer,
         confidence_svc=confidence_svc,
+        hierarchical_svc=hierarchical_svc,
         cache_svc=cache_svc,
     )
+
+    # --------------------------------------------------
+    # 3. Initialize query state
+    # --------------------------------------------------
 
     initial_qstate = QueryState(
         query=body.query,
@@ -219,12 +359,28 @@ async def raw_search(
         top_k=body.top_k,
     )
 
-    retrieved_state = await retrieval_agent.retrieve(initial_qstate)
-    latency_ms = int((time.time() - start_time) * 1000)
+    # --------------------------------------------------
+    # 4. Execute retrieval
+    # --------------------------------------------------
+
+    retrieved_state = await retrieval_agent.retrieve(
+        initial_qstate
+    )
+
+    latency_ms = int(
+        (time.time() - start_time) * 1000
+    )
+
+    # --------------------------------------------------
+    # 5. Return raw results
+    # --------------------------------------------------
 
     return {
         "query": body.query,
-        "results": [r.model_dump() for r in retrieved_state.reranked_results],
+        "results": [
+            result.model_dump()
+            for result in retrieved_state.reranked_results
+        ],
         "confidence": retrieved_state.confidence_level,
         "strategy": retrieved_state.strategy_used,
         "latency_ms": latency_ms,
