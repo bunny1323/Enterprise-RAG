@@ -157,14 +157,9 @@ async def chat_query(
 
     verifier = GroundednessVerificationService()
 
-<<<<<<< HEAD
     # --------------------------------------------------
     # 4. Build LangGraph Nodes and Graph
     # --------------------------------------------------
-
-=======
-    # 2. Build LangGraph Nodes
->>>>>>> 2acbe82 (Complete Enterprise-RAG Phases 1-5 hardening)
     nodes = QueryNodes(
         retrieval_agent=retrieval_agent,
         llm_provider=llm_provider,
@@ -177,11 +172,7 @@ async def chat_query(
         ),
         cache_svc=cache_svc,
     )
-<<<<<<< HEAD
 
-    graph = build_query_graph(nodes)
-=======
->>>>>>> 2acbe82 (Complete Enterprise-RAG Phases 1-5 hardening)
 
     # --------------------------------------------------
     # 5. Initialize workflow state
@@ -212,16 +203,9 @@ async def chat_query(
         error_message=None,
     )
 
-<<<<<<< HEAD
     # --------------------------------------------------
-    # 6. Execute LangGraph workflow
+    # 6. Execute LangGraph workflow with persistent Postgres checkpointer
     # --------------------------------------------------
-
-    final_state = await graph.ainvoke(
-        initial_state
-    )
-=======
-    # 4. Execute LangGraph Workflow with persistent Postgres checkpointer
     try:
         from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
         async with AsyncPostgresSaver.from_conn_string(settings.database_url) as checkpointer:
@@ -235,7 +219,6 @@ async def chat_query(
         # Fallback to no checkpointer if library is not installed
         graph = build_query_graph(nodes)
         final_state = await graph.ainvoke(initial_state)
->>>>>>> 2acbe82 (Complete Enterprise-RAG Phases 1-5 hardening)
 
     if final_state.get("error_message"):
         raise HTTPException(
