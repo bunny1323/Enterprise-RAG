@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "enterprise-rag"
-version = "0.1.0"
-description = "Enterprise Multi-Agent RAG Platform - Phase 1"
+version = "0.2.0"
+description = "Enterprise Multi-Agent RAG Platform — Phase 3-5 Progress"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",
@@ -43,6 +43,18 @@ dev = [
     "pytest-cov>=5.0.0",
     "ruff>=0.6.0",
     "mypy>=1.11.0",
+]
+observability = [
+    "opentelemetry-sdk>=1.25.0",
+    "opentelemetry-api>=1.25.0",
+    "opentelemetry-exporter-otlp>=1.25.0",
+    "opentelemetry-instrumentation-fastapi>=0.46b0",
+    "opentelemetry-instrumentation-httpx>=0.46b0",
+    "prometheus_client>=0.21.0",
+]
+persistence = [
+    "langgraph-checkpoint-postgres>=2.0.0",
+    "psycopg[binary]>=3.2.0",
 ]
 
 [tool.uv]

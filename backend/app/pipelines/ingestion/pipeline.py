@@ -6,6 +6,7 @@ from uuid import UUID
 
 from app.agents.supervisor.state import IngestionState
 from app.config.logging import get_logger
+from app.config.settings import get_settings
 from app.infrastructure.postgres.client import PostgresClient
 from app.models.document import DocumentStatus
 from app.models.job import JobStatus
@@ -35,8 +36,6 @@ _PIPELINE_STEPS = [
     ("embed",       s07_embed, 90,  JobStatus.EMBEDDING),
     ("index",       s08_index, 100, JobStatus.INDEXING),
 ]
-
-_PER_STAGE_TIMEOUT_SECONDS = 300  # 5 minutes per stage
 
 
 class PipelineCancelledException(Exception):
@@ -102,9 +101,13 @@ class IngestionPipeline:
                     postgres, doc_id, job_id, step_name, job_status.value, progress_after
                 )
 
+                # Determine timeout for this step
+                settings = get_settings()
+                timeout = getattr(settings, f"ingestion_timeout_{step_name}", 300)
+
                 # Execute step with timeout
                 state = await asyncio.wait_for(
-                    step_fn(state, self._services), timeout=_PER_STAGE_TIMEOUT_SECONDS
+                    step_fn(state, self._services), timeout=timeout
                 )
 
                 # Record checkpoint
@@ -133,9 +136,9 @@ class IngestionPipeline:
                 )
 
             except asyncio.TimeoutError:
-                err_msg = f"Step '{step_name}' timed out after {_PER_STAGE_TIMEOUT_SECONDS}s"
+                err_msg = f"Step '{step_name}' timed out after {timeout}s"
                 logger.error("pipeline.step_timeout", step=step_name, document_id=str(doc_id))
-                await self._update_failed_status(postgres, doc_id, job_id, err_msg)
+                await self._update_timeout_status(postgres, doc_id, job_id, err_msg)
                 raise TimeoutError(err_msg)
 
             except Exception as err:
@@ -256,6 +259,38 @@ class IngestionPipeline:
                 WHERE job_id = $4
                 """,
                 JobStatus.FAILED.value,
+                err_msg,
+                now,
+                job_id,
+            )
+
+    async def _update_timeout_status(
+        self, postgres: PostgresClient, doc_id: UUID, job_id: UUID | None, err_msg: str
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        await postgres.execute(
+            """
+            UPDATE documents
+            SET status        = $1,
+                error_message = $2,
+                completed_at  = $3
+            WHERE id = $4
+            """,
+            DocumentStatus.TIMEOUT.value,
+            err_msg,
+            now,
+            doc_id,
+        )
+        if job_id:
+            await postgres.execute(
+                """
+                UPDATE ingestion_jobs
+                SET status        = $1,
+                    error_message = $2,
+                    completed_at  = $3
+                WHERE job_id = $4
+                """,
+                JobStatus.TIMEOUT.value,
                 err_msg,
                 now,
                 job_id,

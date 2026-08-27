@@ -161,6 +161,39 @@ class IngestionSupervisor:
         """
         logger.info("supervisor.queue_worker_started")
 
+        # Recover interrupted or unstarted jobs from PostgreSQL
+        try:
+            pending_docs = await self._postgres.fetch(
+                """
+                SELECT id, file_name, storage_path, industry, tenant_id, assistant_id, knowledge_base_id 
+                FROM documents 
+                WHERE status IN ('PENDING', 'PROCESSING', 'EXTRACTING', 'PARSING', 'CHUNKING', 'EMBEDDING', 'WAITING_FOR_EMBEDDING_QUOTA')
+                """
+            )
+            for doc in pending_docs:
+                job_row = await self._postgres.fetchrow(
+                    "SELECT job_id FROM ingestion_jobs WHERE document_id = $1 ORDER BY started_at DESC LIMIT 1",
+                    doc["id"]
+                )
+                if job_row:
+                    state = IngestionState(
+                        document_id=doc["id"],
+                        job_id=job_row["job_id"],
+                        tenant_id=doc["tenant_id"],
+                        assistant_id=doc["assistant_id"],
+                        knowledge_base_id=doc["knowledge_base_id"],
+                        filename=doc["file_name"],
+                        industry=doc["industry"],
+                        storage_path=doc["storage_path"],
+                        status=DocumentStatus.PENDING,
+                    )
+                    await self._queue.put(state)
+            
+            if pending_docs:
+                logger.info("supervisor.queue_recovered", count=len(pending_docs))
+        except Exception as e:
+            logger.error("supervisor.queue_recovery_failed", error=str(e))
+
         while True:
             state: IngestionState = await self._queue.get()
             logger.info(

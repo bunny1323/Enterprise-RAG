@@ -268,6 +268,35 @@ class WeaviateClient:
         logger.info("weaviate.bm25_search_complete", hits=len(results), tenant=tenant_id)
         return results
 
+    def get_chunks_by_ids(
+        self,
+        chunk_ids: list[str],
+        tenant_id: str = "default",
+    ) -> list[dict[str, Any]]:
+        """Fetch chunks by their chunk_id."""
+        if not chunk_ids:
+            return []
+
+        client = self._require_client()
+        collection = client.collections.get(_COLLECTION_NAME)
+
+        # Weaviate v4 Filter using contains_any for list of IDs
+        filters = (
+            wvc.query.Filter.by_property("tenant_id").equal(tenant_id)
+            & wvc.query.Filter.by_property("chunk_id").contains_any(chunk_ids)
+        )
+
+        response = collection.query.fetch_objects(
+            filters=filters,
+            limit=len(chunk_ids),
+        )
+
+        results: list[dict[str, Any]] = []
+        for obj in response.objects:
+            results.append(dict(obj.properties))
+
+        return results
+
     # ── Private helpers ────────────────────────────────────────────────────────
 
     def _require_client(self) -> _WeaviateSDKClient:

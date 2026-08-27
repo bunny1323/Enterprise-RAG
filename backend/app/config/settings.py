@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     debug: bool = Field(default=False)
     port: int = Field(default=8000)
 
+    # Observability
+    otel_endpoint: str = Field(default="")  # e.g. http://localhost:4317
+    otel_console: bool = Field(default=False)  # force console exporter in dev
+    prometheus_port: int = Field(default=9090)
+
     # Voyage AI
     voyage_api_key: str = Field(...)
     voyage_model: str = Field(default="voyage-multimodal-3.5")
@@ -40,7 +45,16 @@ class Settings(BaseSettings):
     # Ingestion Controls
     max_upload_size_mb: int = Field(default=100)
     ingestion_timeout_seconds: int = Field(default=1800)
-    per_stage_timeout_seconds: int = Field(default=300)
+    ingestion_timeout_validation: int = Field(default=30)
+    ingestion_timeout_duplicate: int = Field(default=60)
+    ingestion_timeout_parse: int = Field(default=900)
+    ingestion_timeout_vision: int = Field(default=600)
+    ingestion_timeout_chunk: int = Field(default=300)
+    ingestion_timeout_incremental: int = Field(default=300)
+    ingestion_timeout_metadata: int = Field(default=120)
+    ingestion_timeout_embedding: int = Field(default=600)
+    ingestion_timeout_indexing: int = Field(default=600)
+    parse_profile: str = Field(default="BALANCED")  # FAST | BALANCED | HIGH_ACCURACY
 
     # Weaviate
     weaviate_url: str = Field(...)

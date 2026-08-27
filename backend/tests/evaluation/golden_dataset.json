@@ -1,16 +1,42 @@
 [
   {
-    "question": "What is the operating hydraulic pressure limit?",
-    "expected_keywords": ["250 bar", "hydraulic pressure"],
-    "expected_document_name": "manufacturing_spec.pdf",
-    "expected_page": 12,
-    "expected_section": "Hydraulic System"
+    "question": "What is the maximum operating pressure for the hydraulic pump assembly?",
+    "expected_document": "hydraulic_manual.pdf",
+    "expected_page": 14,
+    "expected_section": "3.2 Hydraulic Pump Specifications",
+    "expected_evidence": "maximum operating pressure 350 bar",
+    "expected_answer": "The maximum operating pressure is 350 bar."
   },
   {
-    "question": "What is the procedure for fault code E-104?",
-    "expected_keywords": ["check wiring", "reset sensor", "E-104"],
-    "expected_document_name": "service_manual.pdf",
+    "question": "What safety precautions must be observed when handling the chemical solvent?",
+    "expected_document": "chemical_safety_sds.pdf",
+    "expected_page": 3,
+    "expected_section": "Section 7: Handling and Storage",
+    "expected_evidence": "avoid contact with skin and eyes",
+    "expected_answer": "Wear appropriate PPE. Avoid contact with skin, eyes, and clothing. Ensure adequate ventilation."
+  },
+  {
+    "question": "What are the recommended maintenance intervals for the gear reducer?",
+    "expected_document": "maintenance_guide.pdf",
+    "expected_page": 22,
+    "expected_section": "Preventive Maintenance Schedule",
+    "expected_evidence": "oil change every 2000 hours",
+    "expected_answer": "Gear reducer oil should be changed every 2000 operating hours."
+  },
+  {
+    "question": "Which torque specification applies to the M12 fasteners in the assembly?",
+    "expected_document": "torque_specifications.pdf",
+    "expected_page": 8,
+    "expected_section": "Fastener Torque Table",
+    "expected_evidence": "M12 fastener 85 Nm",
+    "expected_answer": "M12 fasteners require 85 Nm of torque."
+  },
+  {
+    "question": "What does the alarm code E-404 indicate?",
+    "expected_document": "alarm_codes_manual.pdf",
     "expected_page": 45,
-    "expected_section": "Troubleshooting"
+    "expected_section": "Fault Codes",
+    "expected_evidence": "E-404 motor overcurrent fault",
+    "expected_answer": "Alarm E-404 indicates a motor overcurrent fault."
   }
 ]

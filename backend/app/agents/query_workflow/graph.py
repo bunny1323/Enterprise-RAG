@@ -3,6 +3,7 @@ LangGraph StateGraph definition.
 """
 from typing import Literal
 from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from app.agents.query_workflow.state import QueryWorkflowState
 from app.agents.query_workflow.nodes import QueryNodes
 from app.config.logging import get_logger
@@ -10,7 +11,7 @@ from app.config.logging import get_logger
 logger = get_logger(__name__)
 
 
-def build_query_graph(nodes: QueryNodes) -> StateGraph:
+def build_query_graph(nodes: QueryNodes, checkpointer: BaseCheckpointSaver | None = None) -> StateGraph:
     """
     Build and compile the Phase 3 LangGraph state machine.
     """
@@ -67,4 +68,4 @@ def build_query_graph(nodes: QueryNodes) -> StateGraph:
     workflow.add_edge("generate", "verify")
     workflow.add_conditional_edges("verify", route_after_verify)
 
-    return workflow.compile()
+    return workflow.compile(checkpointer=checkpointer)

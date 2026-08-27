@@ -29,6 +29,7 @@ from app.services.metadata.service import MetadataService
 from app.services.ocr.service import OCRService
 from app.services.storage.service import StorageService
 from app.services.vision.service import VisionService
+from app.config.opentelemetry import setup_telemetry
 
 
 @asynccontextmanager
@@ -40,6 +41,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     configure_logging(debug=settings.debug)
     logger = get_logger(__name__)
+
+    # ── 0. OpenTelemetry setup ─────────────────────────────────────────────────
+    setup_telemetry(
+        service_name=settings.app_name,
+        otlp_endpoint=settings.otel_endpoint or None,
+        enable_console=settings.otel_console or settings.debug,
+    )
 
     logger.info("startup.begin", app=settings.app_name)
 
@@ -182,6 +190,10 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # ── Rate Limiting ──────────────────────────────────────────────────────────
+    from app.api.middleware import RateLimitMiddleware
+    app.add_middleware(RateLimitMiddleware, max_requests=100, window_seconds=60)
 
     # ── Routers ────────────────────────────────────────────────────────────────
     app.include_router(health.router)
