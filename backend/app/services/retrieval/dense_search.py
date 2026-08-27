@@ -50,6 +50,7 @@ class DenseSearchService:
                     page_number=int(r.get("page_number", 0)),
                     document_id=r.get("document_id", ""),
                     chunk_type=r.get("chunk_type", "TEXT"),
+                    parent_id=r.get("parent_id") or None,
                     context_prefix=r.get("context_prefix"),
                     metadata=r,
                 )
