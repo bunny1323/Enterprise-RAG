@@ -16,7 +16,7 @@ logger = get_logger(__name__)
 _BASE_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS documents (
     id                    UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    sha256                TEXT        NOT NULL,
+    sha256                TEXT, 
     file_name             TEXT        NOT NULL,
     storage_path          TEXT        NOT NULL,
     industry              TEXT        NOT NULL DEFAULT 'manufacturing',
@@ -208,6 +208,8 @@ class PostgresClient:
         """
         migrations = [
             # ── documents table ───────────────────────────────────────────────
+            "ALTER TABLE documents ALTER COLUMN sha256 DROP NOT NULL",
+            "ALTER TABLE documents DROP CONSTRAINT IF EXISTS documents_sha256_key",
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'",
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS assistant_id TEXT NOT NULL DEFAULT 'default'",
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS knowledge_base_id TEXT NOT NULL DEFAULT 'default'",

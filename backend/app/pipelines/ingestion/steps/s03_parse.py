@@ -8,6 +8,7 @@ from app.agents.supervisor.state import IngestionState
 from app.config.logging import get_logger
 from app.models.document import DocumentStatus
 from app.services.document_parser.service import DocumentParserService
+from app.config.settings import get_settings
 
 logger = get_logger(__name__)
 
@@ -31,10 +32,12 @@ async def step(state: IngestionState, services: dict[str, Any]) -> IngestionStat
     parser: DocumentParserService = services["parser"]
 
     # Run parser (synchronous Docling/PyMuPDF call wrapped in thread pool by pipeline)
-    import asyncio
+    settings = get_settings()
 
-    loop = asyncio.get_event_loop()
-    parsed_doc = await loop.run_in_executor(None, parser.parse, state.storage_path)
+    parsed_doc = await parser.parse(
+        state.storage_path,
+        timeout=settings.ingestion_timeout_parse,
+    )
 
     page_count = len(parsed_doc.get("pages", []))
 

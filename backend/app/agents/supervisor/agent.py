@@ -92,7 +92,7 @@ class IngestionSupervisor:
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING id
             """,
-            "",  # sha256 placeholder — step 02 will compute and update this
+            None,  # sha256 placeholder — step 02 will compute and update this
             file.filename or "upload.pdf",
             storage_path,
             industry,

@@ -106,7 +106,17 @@ class EmbeddingService:
     def _embed_text_batch_with_retry(self, texts: list[str]) -> list[list[float]]:
         """Embed a single batch of texts with tenacity retry on failure."""
         client = self._get_client()
-        inputs = [{"content": text} for text in texts]
+        inputs = [
+            {
+               "content": [
+                   {
+                       "type": "text",
+                       "text": text,
+                    }
+                ]
+         }
+         for text in texts
+    ]
 
         try:
             result = client.multimodal_embed(
