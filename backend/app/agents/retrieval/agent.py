@@ -19,7 +19,7 @@ from app.services.retrieval.bm25_search import BM25SearchService
 from app.services.retrieval.dense_search import DenseSearchService
 from app.services.retrieval.graph_search import GraphSearchService
 from app.services.retrieval.hierarchical import HierarchicalRetrievalService
-from app.services.retrieval.reranking import VoyageRerankService
+from app.services.retrieval.reranking import RRFRerankerService
 from app.utils.fusion import reciprocal_rank_fusion
 
 from app.config.opentelemetry import get_tracer
@@ -38,7 +38,7 @@ class RetrievalAgent:
         dense_svc: DenseSearchService,
         bm25_svc: BM25SearchService,
         graph_svc: GraphSearchService,
-        reranker: VoyageRerankService,
+        reranker: RRFRerankerService,
         normalizer: QueryNormalizationService,
         confidence_svc: ConfidenceScoringService,
         hierarchical_svc: HierarchicalRetrievalService,
@@ -90,7 +90,7 @@ class RetrievalAgent:
                 )
 
             if not query_vec:
-                # Voyage client is synchronous, so run embedding in executor.
+                # LocalEmbeddingProvider is synchronous, so run embedding in executor.
                 loop = asyncio.get_event_loop()
 
                 query_vectors = await loop.run_in_executor(
@@ -126,7 +126,7 @@ class RetrievalAgent:
                 ),
             }
 
-            if intent in ("RELATIONSHIP", "TECHNICAL"):
+            if intent in ("RELATIONSHIP", "ROOT_CAUSE_ANALYSIS", "COMPONENT_IDENTIFICATION", "PREDICTIVE_MAINTENANCE"):
                 entity_query = (
                     norm.extracted_entities[0]
                     if norm.extracted_entities
@@ -177,6 +177,32 @@ class RetrievalAgent:
             if graph_results:
                 channel_lists.append(graph_results)
                 
+            # Apply intent-based strategy modifications
+            if intent in ("IMAGE_RETRIEVAL", "DIAGRAM_RETRIEVAL", "PAGE_RETRIEVAL", "SPECIFICATION"):
+                for lst in channel_lists:
+                    for res in lst:
+                        if intent == "IMAGE_RETRIEVAL" and res.chunk_type == "IMAGE":
+                            res.score += 2.0
+                        elif intent == "DIAGRAM_RETRIEVAL" and res.chunk_type in ("DIAGRAM", "IMAGE"):
+                            res.score += 2.0
+                        elif intent == "SPECIFICATION" and res.chunk_type == "TABLE":
+                            res.score += 1.0
+                        elif intent == "PAGE_RETRIEVAL" and res.chunk_type == "PAGE":
+                            res.score += 2.0
+                    lst.sort(key=lambda x: x.score, reverse=True)
+            elif intent == "PROCEDURE":
+                for lst in channel_lists:
+                    for res in lst:
+                        if res.chunk_type == "TEXT" and any(w in res.content.lower() for w in ["step", "1.", "first"]):
+                            res.score += 0.5
+                    lst.sort(key=lambda x: x.score, reverse=True)
+            elif intent == "ERROR_CODE":
+                if bm25_results:
+                    for res in bm25_results:
+                        if any(e.lower() in res.content.lower() for e in norm.extracted_entities):
+                            res.score += 3.0
+                    bm25_results.sort(key=lambda x: x.score, reverse=True)
+
             if not channel_lists:
                 # Complete failure of all retrieval channels
                 logger.error("retrieval_agent.all_channels_failed", tenant=ctx.tenant_id)

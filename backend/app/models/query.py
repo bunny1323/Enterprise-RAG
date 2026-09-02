@@ -45,11 +45,17 @@ class QueryResponse(BaseModel):
     """Structured evidence-backed response from Enterprise-RAG."""
 
     answer: str
+    intent: str = Field(default="GENERAL_QA")
+    intent_confidence: float = Field(default=1.0)
     citations: list[Citation] = Field(default_factory=list)
     confidence: str = Field(default="HIGH", description="HIGH | MEDIUM | LOW")
     confidence_score: float = Field(default=1.0)
     evidence: list[EvidenceSnippet] = Field(default_factory=list)
     sources: list[SourceRef] = Field(default_factory=list)
+    images: list[dict] = Field(default_factory=list)
+    tables: list[dict] = Field(default_factory=list)
+    pages: list[int] = Field(default_factory=list)
+    retrieval_trace: dict = Field(default_factory=dict)
     verification_status: str = Field(default="SUPPORTED", description="SUPPORTED | PARTIALLY_SUPPORTED | UNSUPPORTED")
     trace_id: str
     retrieval_strategy: str

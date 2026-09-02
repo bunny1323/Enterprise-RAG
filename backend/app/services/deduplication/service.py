@@ -63,6 +63,24 @@ class DeduplicationService:
         )
         return row
 
+    async def get_failed_document_by_hash(
+        self, sha256: str, tenant_id: str, current_doc_id: UUID, postgres: PostgresClient
+    ) -> dict | None:
+        """Query PostgreSQL for a FAILED document with the same SHA-256 to allow retry."""
+        row = await postgres.fetchrow(
+            """
+            SELECT id, sha256
+            FROM documents
+            WHERE sha256 = $1 AND tenant_id = $2 AND id != $3 AND status = 'FAILED'
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            sha256,
+            tenant_id,
+            current_doc_id,
+        )
+        return row
+
     # ── Level 2: Content Hash (Normalized Text) ──────────────────────────────
 
     async def check_content_hash(

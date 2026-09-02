@@ -3,18 +3,16 @@ Application settings loaded from environment variables via Pydantic BaseSettings
 All configuration is centralized here — no hard-coded values elsewhere.
 """
 
-
-
 from pathlib import Path
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(".env", "backend/.env", "../.env"),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -30,13 +28,12 @@ class Settings(BaseSettings):
     otel_console: bool = Field(default=False)  # force console exporter in dev
     prometheus_port: int = Field(default=9090)
 
-    # Voyage AI
-    voyage_api_key: str = Field(...)
-    voyage_model: str = Field(default="voyage-multimodal-3.5")
-    voyage_text_model: str = Field(default="voyage-3.5")
-    voyage_tpm_limit: int = Field(default=300_000)
-    voyage_max_batch_size: int = Field(default=32)
-    voyage_max_retries: int = Field(default=10)
+    embedding_provider: str = Field(default="local")
+
+    # Local embedding (sentence-transformers, CPU, no API key required)
+    local_embedding_model: str = Field(default="BAAI/bge-small-en-v1.5")
+    local_embedding_device: str = Field(default="cpu")
+    local_embedding_batch_size: int = Field(default=8)
 
     # Redis
     redis_url: str = Field(default="redis://localhost:6379")
@@ -71,6 +68,20 @@ class Settings(BaseSettings):
     # Ollama
     ollama_base_url: str = Field(default="http://localhost:11434")
     ollama_vision_model: str = Field(default="llava:13b")
+    ollama_model: str = Field(default="qwen2.5:7b")
+    ollama_timeout: float = Field(default=15.0, gt=0, validation_alias=AliasChoices("OLLAMA_TIMEOUT", "LLM_FALLBACK_TIMEOUT"))
+
+    # Generation LLM. Groq is Primary, Ollama is Fallback.
+    llm_provider: str = Field(default="groq")
+    llm_model: str = Field(default="llama-3.3-70b-versatile", validation_alias=AliasChoices("LLM_MODEL", "GROQ_MODEL"))
+    llm_base_url: str = Field(default="", validation_alias=AliasChoices("LLM_BASE_URL", "GROQ_BASE_URL"))
+    llm_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("GROQ_API_KEY", "LLM_API_KEY", "OPENAI_API_KEY"),
+    )
+    llm_timeout: float = Field(default=30.0, gt=0, validation_alias=AliasChoices("LLM_TIMEOUT", "LLM_TIMEOUT_SECONDS"))
+    llm_temperature: float = Field(default=0.2, ge=0, le=2)
+    llm_max_tokens: int = Field(default=768, gt=0)
 
     # Local storage
     raw_storage_path: str = Field(default="./data/raw")
@@ -87,6 +98,18 @@ class Settings(BaseSettings):
     def ensure_paths_exist(cls, v: str) -> str:
         Path(v).mkdir(parents=True, exist_ok=True)
         return v
+
+    @field_validator("debug", mode="before")
+    @classmethod
+    def normalize_debug_mode(cls, value: object) -> object:
+        """Accept common deployment-mode values while retaining a boolean setting."""
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"release", "production", "prod"}:
+                return False
+            if normalized in {"development", "dev"}:
+                return True
+        return value
 
     @property
     def database_url_async(self) -> str:

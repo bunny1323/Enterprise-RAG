@@ -43,8 +43,18 @@ class StorageClient:
         Returns:
             Absolute path string to the saved file.
         """
+        # Path traversal protection
+        filename = Path(filename).name
+        if not filename:
+            raise ValueError("Invalid filename")
+
         safe_name = f"{uuid.uuid4().hex}_{filename}"
-        dest = self._raw / safe_name
+        dest = (self._raw / safe_name).resolve()
+        
+        # Verify it stays within the raw directory
+        if not str(dest).startswith(str(self._raw.resolve())):
+            raise ValueError("Path traversal detected")
+
         dest.write_bytes(file_bytes)
         logger.info("storage.upload_saved", path=str(dest), size=len(file_bytes))
         return str(dest)

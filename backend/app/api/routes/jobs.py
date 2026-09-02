@@ -10,7 +10,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.api.dependencies import PostgresDep, SupervisorDep
+from app.api.dependencies import PostgresDep, SupervisorDep, TenantContextDep
 from app.config.logging import get_logger
 from app.models.job import IngestionJob, JobStatus
 
@@ -27,6 +27,7 @@ router = APIRouter(prefix="/api/v1/jobs", tags=["jobs"])
 async def get_job_status(
     job_id: str,
     postgres: PostgresDep,
+    tenant_ctx: TenantContextDep,
 ) -> IngestionJob:
     """
     Poll an ingestion job's status, progress, checkpoints, and current stage.
@@ -46,9 +47,11 @@ async def get_job_status(
                last_successful_stage, stage_checkpoints, error_message,
                created_at, started_at, completed_at, timeout_at, cancelled_at, metadata
         FROM ingestion_jobs
-        WHERE job_id = $1
+        WHERE job_id = $1 AND tenant_id = $2 AND knowledge_base_id = $3
         """,
         j_uuid,
+        tenant_ctx.tenant_id,
+        tenant_ctx.knowledge_base_id,
     )
 
     if row is None:
@@ -96,6 +99,7 @@ async def get_job_status(
 async def cancel_job(
     job_id: str,
     postgres: PostgresDep,
+    tenant_ctx: TenantContextDep,
 ) -> dict:
     """Mark an active ingestion job as CANCELLED."""
     try:
@@ -107,8 +111,13 @@ async def cancel_job(
         )
 
     row = await postgres.fetchrow(
-        "SELECT job_id, document_id, status FROM ingestion_jobs WHERE job_id = $1",
+        """
+        SELECT job_id, document_id, status FROM ingestion_jobs
+        WHERE job_id = $1 AND tenant_id = $2 AND knowledge_base_id = $3
+        """,
         j_uuid,
+        tenant_ctx.tenant_id,
+        tenant_ctx.knowledge_base_id,
     )
 
     if row is None:

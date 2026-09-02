@@ -23,8 +23,8 @@ from app.agents.supervisor.agent import IngestionSupervisor
 from app.pipelines.ingestion.pipeline import IngestionPipeline
 from app.services.chunking.service import ChunkingService
 from app.services.document_parser.service import DocumentParserService
-from app.services.embeddings.service import EmbeddingService
-from app.services.generation.llm import OllamaProvider
+from app.services.embeddings.factory import build_embedding_provider
+from app.services.generation.llm import build_llm_provider
 from app.services.metadata.service import MetadataService
 from app.services.ocr.service import OCRService
 from app.services.storage.service import StorageService
@@ -62,8 +62,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         url=settings.weaviate_url,
         api_key=settings.weaviate_api_key,
     )
-    weaviate_client.connect()
-    weaviate_client.init_schema()
+    try:
+        weaviate_client.connect()
+        weaviate_client.init_schema()
+    except Exception as err:
+        # The API can still provide liveness and report a truthful readiness
+        # failure. Ingestion will record failed/partial vector indexing instead
+        # of claiming success.
+        logger.error("startup.weaviate_unavailable", error=str(err))
     app.state.weaviate = weaviate_client
 
     # ── 3. Neo4j ───────────────────────────────────────────────────────────────
@@ -72,8 +78,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         user=settings.neo4j_user,
         password=settings.neo4j_password,
     )
-    await neo4j_client.connect()
-    await neo4j_client.init_schema()
+    try:
+        await neo4j_client.connect()
+        await neo4j_client.init_schema()
+    except Exception as err:
+        # Keep the process available for diagnostics; graph indexing/search will
+        # expose the dependency failure through their existing error paths.
+        logger.error("startup.neo4j_unavailable", error=str(err))
     app.state.neo4j = neo4j_client
 
     # ── 4. Redis Client ────────────────────────────────────────────────────────
@@ -103,13 +114,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     chunker_service = ChunkingService()
     metadata_service = MetadataService(config_dir="./config/industries")
-    embedding_service = EmbeddingService(
-        api_key=settings.voyage_api_key,
-        model=settings.voyage_model,
-    )
-    llm_provider = OllamaProvider(
-        base_url=settings.ollama_base_url,
-        model=settings.ollama_vision_model,
+
+    # Pick embedding provider based on EMBEDDING_PROVIDER env var
+    embedding_service = build_embedding_provider(settings)
+
+    llm_provider = build_llm_provider(
+        provider=settings.llm_provider,
+        model=settings.llm_model,
+        base_url=settings.llm_base_url,
+        api_key=settings.llm_api_key,
+        timeout=settings.llm_timeout,
+        temperature=settings.llm_temperature,
+        max_tokens=settings.llm_max_tokens,
+        ollama_base_url=settings.ollama_base_url,
+        ollama_model=settings.ollama_model,
+        ollama_timeout=settings.ollama_timeout,
     )
     app.state.embedder = embedding_service
     app.state.llm_provider = llm_provider
@@ -142,9 +161,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.queue_task = queue_task
     logger.info("startup.queue_worker_started")
 
-    logger.info("startup.complete", app=settings.app_name, port=settings.port)
+    # ── 10. Start checkpointer ────────────────────────────────────────────────
+    try:
+        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+        checkpointer_cm = AsyncPostgresSaver.from_conn_string(settings.database_url)
+    except Exception as e:
+        logger.warning("startup.checkpointer_failed", error=str(e))
+        checkpointer_cm = None
 
-    yield  # ── Application is running ────────────────────────────────────────
+    if checkpointer_cm:
+        async with checkpointer_cm as checkpointer:
+            await checkpointer.setup()
+            app.state.checkpointer = checkpointer
+            logger.info("startup.checkpointer_ready")
+            
+            logger.info("startup.complete", app=settings.app_name, port=settings.port)
+            yield  # ── Application is running ────────────────────────────────────────
+    else:
+        app.state.checkpointer = None
+        logger.info("startup.complete", app=settings.app_name, port=settings.port)
+        yield  # ── Application is running ────────────────────────────────────────
 
     # ── Shutdown ───────────────────────────────────────────────────────────────
     logger.info("shutdown.begin")
@@ -191,15 +227,26 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # ── Rate Limiting ──────────────────────────────────────────────────────────
-    from app.api.middleware import RateLimitMiddleware
+    # ── Rate Limiting & Audit Logging ──────────────────────────────────────────
+    from app.api.middleware import RateLimitMiddleware, AuditLogMiddleware
     app.add_middleware(RateLimitMiddleware, max_requests=100, window_seconds=60)
+    app.add_middleware(AuditLogMiddleware)
 
     # ── Routers ────────────────────────────────────────────────────────────────
     app.include_router(health.router)
     app.include_router(documents.router)
     app.include_router(jobs.router)
     app.include_router(query.router)
+
+    # ── Static Images ──────────────────────────────────────────────────────────
+    from fastapi.staticfiles import StaticFiles
+    import os
+    os.makedirs(settings.processed_storage_path, exist_ok=True)
+    app.mount(
+        "/api/v1/images",
+        StaticFiles(directory=settings.processed_storage_path),
+        name="images"
+    )
 
     return app
 

@@ -56,7 +56,7 @@ class IngestionState(BaseModel):
         default=None, description="Hierarchical chunks (set by step 05)"
     )
     vectors: list[list[float]] | None = Field(
-        default=None, description="1024-dim Voyage vectors (set by step 07)"
+        default=None, description="384-dim BGE (BAAI/bge-small-en-v1.5) vectors (set by step 07)"
     )
 
     # ── Resumability & Checkpointing ────────────────────────────────────────────
@@ -75,8 +75,9 @@ class IngestionState(BaseModel):
     # ── Pipeline Versioning ───────────────────────────────────────────────────
     parser_version: str = Field(default="docling-2.x")
     chunking_version: str = Field(default="1.0")
-    embedding_model: str = Field(default="voyage-multimodal-3.5")
-    embedding_model_version: str = Field(default="3.5")
+    # Set by the pipeline at startup from the active embedding provider
+    embedding_model: str = Field(default="")
+    embedding_model_version: str = Field(default="")
 
     # ── Status & Control ───────────────────────────────────────────────────────
     status: DocumentStatus = Field(

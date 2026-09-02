@@ -205,6 +205,11 @@ class PostgresClient:
 
         Runs after CREATE TABLE IF NOT EXISTS so existing tables from earlier
         schema versions get all new columns without data loss.
+        
+        Handles duplicate (tenant_id, sha256) rows gracefully without altering data:
+        - Logs any duplicates for operational awareness
+        - Defers the unique constraint if duplicates exist
+        - Enforces the constraint for new documents via runtime checks
         """
         migrations = [
             # ── documents table ───────────────────────────────────────────────
@@ -223,6 +228,9 @@ class PostgresClient:
             "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS assistant_id TEXT NOT NULL DEFAULT 'default'",
             "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS knowledge_base_id TEXT NOT NULL DEFAULT 'default'",
             "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS content_hash TEXT",
+            "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS section TEXT",
+            "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS subsection TEXT",
+            "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS context_prefix TEXT",
             "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS embedding_representation TEXT DEFAULT 'text'",
             # ── ingestion_jobs table ─────────────────────────────────────────
             "ALTER TABLE ingestion_jobs ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'",
@@ -235,7 +243,81 @@ class PostgresClient:
             except Exception as err:
                 # Log but don't fail — some may already exist or have different types
                 logger.warning("postgres.migration_warning", sql=sql[:80], error=str(err))
+        
+        # ── Handle tenant-scoped uniqueness constraint ──────────────────────────
+        await self._apply_tenant_uniqueness_constraint()
         logger.info("postgres.column_migrations_applied")
+
+    async def _apply_tenant_uniqueness_constraint(self) -> None:
+        """
+        Apply or defer the tenant-scoped uniqueness constraint on (tenant_id, sha256).
+        
+        If duplicates exist, logs them and defers the constraint without modifying data.
+        Runtime checks in ingestion pipeline enforce uniqueness for new uploads.
+        """
+        try:
+            # Check for existing constraint
+            constraint_exists = await self.fetchval(
+                """SELECT EXISTS(
+                    SELECT 1 FROM information_schema.table_constraints 
+                    WHERE table_name = 'documents' 
+                    AND constraint_name = 'documents_tenant_sha256_key'
+                    AND constraint_type = 'UNIQUE'
+                )"""
+            )
+            if constraint_exists:
+                logger.info("postgres.constraint_already_exists", constraint="documents_tenant_sha256_key")
+                return
+        except Exception as err:
+            logger.warning("postgres.constraint_check_failed", error=str(err))
+        
+        # Check for duplicate (tenant_id, sha256) pairs in existing data
+        try:
+            duplicates = await self.fetch(
+                """SELECT tenant_id, sha256, COUNT(*) as cnt, ARRAY_AGG(id::TEXT) as doc_ids
+                   FROM documents 
+                   GROUP BY tenant_id, sha256 
+                   HAVING COUNT(*) > 1
+                   ORDER BY cnt DESC"""
+            )
+            
+            if duplicates:
+                logger.warning(
+                    "postgres.duplicate_tenant_sha256_found",
+                    count=len(duplicates),
+                    duplicates=[
+                        {
+                            "tenant_id": row["tenant_id"],
+                            "sha256": row["sha256"],
+                            "num_documents": row["cnt"],
+                            "document_ids": row["doc_ids"]
+                        }
+                        for row in duplicates
+                    ]
+                )
+                logger.info(
+                    "postgres.deferred_uniqueness_constraint",
+                    reason="existing_duplicates",
+                    mitigation="Runtime checks enforce uniqueness for new ingestion"
+                )
+                return
+        except Exception as err:
+            logger.warning("postgres.duplicate_check_failed", error=str(err))
+        
+        # No duplicates found — safe to add the hard constraint
+        try:
+            await self.execute("ALTER TABLE documents DROP CONSTRAINT IF EXISTS documents_sha256_key")
+            await self.execute(
+                "ALTER TABLE documents ADD CONSTRAINT documents_tenant_sha256_key UNIQUE (tenant_id, sha256)"
+            )
+            logger.info("postgres.uniqueness_constraint_added", constraint="documents_tenant_sha256_key")
+        except Exception as err:
+            logger.error(
+                "postgres.constraint_addition_failed",
+                constraint="documents_tenant_sha256_key",
+                error=str(err),
+                mitigation="Runtime ingestion checks will enforce uniqueness; operator must resolve duplicates"
+            )
 
     async def close(self) -> None:
         """Drain and close the connection pool."""

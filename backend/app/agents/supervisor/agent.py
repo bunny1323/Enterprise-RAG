@@ -5,6 +5,7 @@ Returns document_id in <100ms by deferring all heavy processing to the backgroun
 """
 import asyncio
 import traceback
+import uuid
 from uuid import UUID
 
 from fastapi import UploadFile
@@ -92,7 +93,7 @@ class IngestionSupervisor:
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING id
             """,
-            "",  # sha256 placeholder — step 02 will compute and update this
+            f"pending_{uuid.uuid4().hex}",  # Unique sha256 placeholder
             file.filename or "upload.pdf",
             storage_path,
             industry,
