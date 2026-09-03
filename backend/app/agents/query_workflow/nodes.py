@@ -13,6 +13,8 @@ from app.services.cache.service import CacheService
 from app.services.cache.semantic import SemanticCacheService
 from app.services.embeddings.service import EmbeddingService
 from app.infrastructure.opa.client import OPAClient
+from app.services.query.normalization import QueryNormalizationService
+from app.services.retrieval.coverage import EvidenceCoverageService
 from app.config.logging import get_logger
 from app.config.opentelemetry import get_tracer
 
@@ -35,6 +37,8 @@ class QueryNodes:
         cache_svc: CacheService | None,
         semantic_cache_svc: SemanticCacheService | None = None,
         embedder: EmbeddingService | None = None,
+        coverage_svc: EvidenceCoverageService | None = None,
+        normalizer: QueryNormalizationService | None = None,
     ):
         self._retrieval_agent = retrieval_agent
         self._llm = llm_provider
@@ -44,6 +48,8 @@ class QueryNodes:
         self._cache = cache_svc
         self._semantic_cache = semantic_cache_svc
         self._embedder = embedder
+        self._coverage_svc = coverage_svc or EvidenceCoverageService()
+        self._normalizer = normalizer or QueryNormalizationService()
 
     async def evaluate_policy(self, state: QueryWorkflowState) -> QueryWorkflowState:
         """Check OPA policies."""
@@ -160,6 +166,42 @@ class QueryNodes:
 
             return state
 
+    async def check_answerability(self, state: QueryWorkflowState) -> QueryWorkflowState:
+        """Evaluate evidence coverage and gate hallucination-prone generation."""
+        with tracer.start_as_current_span("QueryNodes.check_answerability") as span:
+            if state.get("cache_hit") or state.get("error_message"):
+                return state
+
+            norm = self._normalizer.normalize(state["query"])
+            evidence = state.get("reranked_results", [])
+            coverage_result = self._coverage_svc.evaluate_coverage(norm, evidence)
+
+            state["evidence_coverage"] = coverage_result.coverage_status
+            state["answerable"] = coverage_result.answerable
+            state["retrieval_trace"] = {
+                "intent": norm.intent,
+                "entities_required": coverage_result.entities_required,
+                "entities_found": coverage_result.entities_found,
+                "retrieval_strategy": state.get("retrieval_strategy", "hybrid"),
+                "evidence_count": len(evidence),
+                "evidence_coverage": coverage_result.coverage_status,
+                "answerable": coverage_result.answerable,
+                "relationship_supported": coverage_result.relationship_supported,
+                "inferred_only": coverage_result.inferred_only,
+                "reason": coverage_result.reason,
+            }
+
+            span.set_attribute("evidence_coverage", coverage_result.coverage_status)
+            span.set_attribute("answerable", coverage_result.answerable)
+
+            if not coverage_result.answerable:
+                state["answer"] = "The provided evidence does not contain enough information to answer this question."
+                state["verification_status"] = "UNSUPPORTED"
+                state["citations"] = []
+                state["sources"] = []
+
+            return state
+
     async def refine_query(self, state: QueryWorkflowState) -> QueryWorkflowState:
         """Refine query if confidence is low."""
         with tracer.start_as_current_span("QueryNodes.refine_query") as span:
@@ -173,6 +215,11 @@ class QueryNodes:
     async def generate_response(self, state: QueryWorkflowState) -> QueryWorkflowState:
         """Generate response via LLM with complexity-based model routing."""
         with tracer.start_as_current_span("QueryNodes.generate_response") as span:
+            # If answerability gate already set answer due to insufficient evidence, skip LLM
+            if state.get("answerable") is False and state.get("answer"):
+                span.set_attribute("gated_insufficient_evidence", True)
+                return state
+
             evidence = state.get("reranked_results", [])
             
             if not evidence:
@@ -183,9 +230,13 @@ class QueryNodes:
                 state["verification_status"] = "UNSUPPORTED"
                 return state
 
+            from app.services.generation.llm import get_intent_system_instruction
+            sys_inst = get_intent_system_instruction(state.get("intent"))
+
             gen_result = await self._llm.generate(
                 prompt=state["query"],
                 evidence=evidence,
+                system_instruction=sys_inst,
             )
             state["answer"] = gen_result.answer
 

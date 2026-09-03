@@ -17,6 +17,9 @@ class SearchResult(BaseModel):
     parent_id: str | None = None
 
     section: str | None = None
+    section_number: int | None = None
+    section_title: str | None = None
+    file_name: str | None = None
     subsection: str | None = None
     context_prefix: str | None = None
     metadata: dict = Field(default_factory=dict)

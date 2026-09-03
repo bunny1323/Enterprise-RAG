@@ -49,6 +49,9 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/api/v1", tags=["query"])
 
 
+from app.services.retrieval.structure_search import StructureSearchService
+
+
 def _build_retrieval_agent(request: Request, postgres, cache_svc) -> RetrievalAgent:
     """Build the RetrievalAgent from app.state services."""
     embedder: EmbeddingService = request.app.state.embedder
@@ -63,6 +66,7 @@ def _build_retrieval_agent(request: Request, postgres, cache_svc) -> RetrievalAg
         hierarchical_svc=HierarchicalRetrievalService(postgres),
         cache_svc=cache_svc,
         weaviate_client=request.app.state.weaviate,
+        structure_svc=StructureSearchService(postgres),
     )
 
 
@@ -218,6 +222,9 @@ async def chat_query(
             "graph_count": len(final_state.get("graph_results", [])),
             "fused_count": len(final_state.get("fused_results", [])),
             "final_count": len(final_state.get("reranked_results", [])),
+            "evidence_coverage": final_state.get("evidence_coverage", "COMPLETE"),
+            "answerable": final_state.get("answerable", True),
+            **(final_state.get("retrieval_trace") or {}),
             "latency_ms": latency_ms,
         },
         verification_status=final_state["verification_status"],

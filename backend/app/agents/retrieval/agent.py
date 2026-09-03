@@ -20,7 +20,10 @@ from app.services.retrieval.dense_search import DenseSearchService
 from app.services.retrieval.graph_search import GraphSearchService
 from app.services.retrieval.hierarchical import HierarchicalRetrievalService
 from app.services.retrieval.reranking import RRFRerankerService
+from app.services.retrieval.structure_search import StructureSearchService
+from app.services.query.decomposition import QueryDecompositionService
 from app.utils.fusion import reciprocal_rank_fusion
+from app.models.retrieval import SearchResult
 
 from app.config.opentelemetry import get_tracer
 
@@ -44,6 +47,8 @@ class RetrievalAgent:
         hierarchical_svc: HierarchicalRetrievalService,
         cache_svc: CacheService | None = None,
         weaviate_client: Any | None = None,
+        structure_svc: StructureSearchService | None = None,
+        decomposer_svc: QueryDecompositionService | None = None,
     ) -> None:
         self._embedder = embedder
         self._dense_svc = dense_svc
@@ -55,6 +60,8 @@ class RetrievalAgent:
         self._hierarchical_svc = hierarchical_svc
         self._cache_svc = cache_svc
         self._weaviate = weaviate_client
+        self._structure_svc = structure_svc
+        self._decomposer_svc = decomposer_svc or QueryDecompositionService()
 
     async def retrieve(
         self,
@@ -80,6 +87,79 @@ class RetrievalAgent:
                 intent=intent,
                 tenant=ctx.tenant_id,
             )
+
+            # ── 0. STRUCTURAL RETRIEVAL FAST-PATH ─────────────────────────────
+            # For COUNT_QUERY and LIST_QUERY (e.g., "How many major sections...",
+            # "What are the major sections?"), query the canonical document_structure index.
+            if self._structure_svc:
+                if intent == "COUNT_QUERY":
+                    count = await self._structure_svc.count_sections(
+                        tenant_id=ctx.tenant_id,
+                        knowledge_base_id=ctx.knowledge_base_id,
+                    )
+                    sections = await self._structure_svc.list_sections(
+                        tenant_id=ctx.tenant_id,
+                        knowledge_base_id=ctx.knowledge_base_id,
+                    )
+                    evidence = [
+                        SearchResult(
+                            chunk_id="struct::count::sections",
+                            score=1.0,
+                            content=(
+                                f"There are {count} major sections described in the service manual:\n"
+                                + "\n".join(f"- {s.section}" for s in sections)
+                            ),
+                            page_number=1,
+                            section="DOCUMENT STRUCTURE - MAJOR SECTIONS",
+                            metadata={"source": "document_structure", "count": count},
+                        )
+                    ] + sections
+                    return query_state.model_copy(
+                        update={
+                            "intent": intent,
+                            "fused_results": evidence,
+                            "reranked_results": evidence,
+                            "confidence_level": "HIGH",
+                            "confidence_score": 1.0,
+                            "strategy_used": "document_structure_count",
+                        }
+                    )
+
+                elif intent == "LIST_QUERY":
+                    sections = await self._structure_svc.list_sections(
+                        tenant_id=ctx.tenant_id,
+                        knowledge_base_id=ctx.knowledge_base_id,
+                    )
+                    if sections:
+                        return query_state.model_copy(
+                            update={
+                                "intent": intent,
+                                "fused_results": sections,
+                                "reranked_results": sections,
+                                "confidence_level": "HIGH",
+                                "confidence_score": 1.0,
+                                "strategy_used": "document_structure_list",
+                            }
+                        )
+
+                elif intent == "PAGE_NUMBER_FORMAT":
+                    notation = norm.extracted_notation or "2-3"
+                    pf_results = await self._structure_svc.lookup_page_format(
+                        notation=notation,
+                        tenant_id=ctx.tenant_id,
+                        knowledge_base_id=ctx.knowledge_base_id,
+                    )
+                    if pf_results:
+                        return query_state.model_copy(
+                            update={
+                                "intent": intent,
+                                "fused_results": pf_results,
+                                "reranked_results": pf_results,
+                                "confidence_level": "HIGH",
+                                "confidence_score": 1.0,
+                                "strategy_used": "document_structure_page_format",
+                            }
+                        )
 
             # 1. Generate query embedding (with caching)
             query_vec = None
@@ -126,6 +206,24 @@ class RetrievalAgent:
                 ),
             }
 
+            # ── Multi-hop / Relationship sub-query decomposition ───────────────
+            extra_bm25: list[SearchResult] = []
+            if intent in ("MULTI_HOP", "RELATIONSHIP"):
+                sub_queries = self._decomposer_svc.decompose(norm)
+                for sq in sub_queries:
+                    if sq.query != norm.clean_query:
+                        try:
+                            sub_res = await self._bm25_svc.search(
+                                query_text=sq.query,
+                                top_k=5,
+                                tenant_id=ctx.tenant_id,
+                                knowledge_base_id=ctx.knowledge_base_id,
+                                permitted_access_levels=permitted_access_levels,
+                            )
+                            extra_bm25.extend(sub_res)
+                        except Exception as e:
+                            logger.warning("retrieval_agent.subquery_bm25_failed", sub_query=sq.query, error=str(e))
+
             if intent in ("RELATIONSHIP", "ROOT_CAUSE_ANALYSIS", "COMPONENT_IDENTIFICATION", "PREDICTIVE_MAINTENANCE"):
                 entity_query = (
                     norm.extracted_entities[0]
@@ -168,12 +266,13 @@ class RetrievalAgent:
                 elif key == "graph":
                     graph_results = res
 
-            # 3. Fuse results using Reciprocal Rank Fusion (RRF)
             channel_lists = []
             if dense_results:
                 channel_lists.append(dense_results)
             if bm25_results:
                 channel_lists.append(bm25_results)
+            if extra_bm25:
+                channel_lists.append(extra_bm25)
             if graph_results:
                 channel_lists.append(graph_results)
                 
@@ -202,6 +301,33 @@ class RetrievalAgent:
                         if any(e.lower() in res.content.lower() for e in norm.extracted_entities):
                             res.score += 3.0
                     bm25_results.sort(key=lambda x: x.score, reverse=True)
+            elif intent == "SECTION_LOOKUP" and norm.requested_section_number is not None:
+                # Pre-RRF: boost all results whose section_number already matches
+                req_sec = norm.requested_section_number
+                for lst in channel_lists:
+                    for res in lst:
+                        if res.section_number == req_sec:
+                            res.score += 5.0
+                    lst.sort(key=lambda x: x.score, reverse=True)
+            elif intent in ("COMPARISON", "GENERAL_QA", "MAINTENANCE", "PROCEDURE",
+                            "SPECIFICATION", "TROUBLESHOOTING", "ROOT_CAUSE_ANALYSIS",
+                            "MULTI_HOP", "ERROR_CODE"):
+                # Boost chunks whose content contains the most query keywords
+                # This prevents large sections (like Section 9 MAINTENANCE) from
+                # dominating purely by volume of indexed content.
+                query_keywords = [
+                    w for w in norm.clean_query.lower().split()
+                    if len(w) > 3 and w not in {"what", "does", "this", "that", "from", "with",
+                                                 "have", "when", "where", "which", "there", "their",
+                                                 "between", "difference", "explain", "tell", "give"}
+                ]
+                if query_keywords:
+                    for lst in channel_lists:
+                        for res in lst:
+                            hit_count = sum(1 for kw in query_keywords if kw in res.content.lower())
+                            if hit_count > 0:
+                                res.score += hit_count * 0.4  # boost proportional to keyword hits
+                        lst.sort(key=lambda x: x.score, reverse=True)
 
             if not channel_lists:
                 # Complete failure of all retrieval channels
@@ -218,6 +344,23 @@ class RetrievalAgent:
                     k=60,
                     top_n=30,
                 )
+
+                # ── SECTION_LOOKUP post-fusion boost ──────────────────────────
+                # Multiply score for chunks that exactly match the requested
+                # section_number. This ensures "3. CONVERSION TABLE" chunks
+                # (section_number=None or section_number != 3) don't surface as
+                # Section 3 when the user asks "what is section 3?".
+                if intent == "SECTION_LOOKUP" and norm.requested_section_number is not None:
+                    req_sec = norm.requested_section_number
+                    for res in fused:
+                        if res.section_number == req_sec:
+                            res.score *= 2.0  # boost exact section match
+                    fused.sort(key=lambda x: x.score, reverse=True)
+                    logger.info(
+                        "retrieval_agent.section_lookup_boost",
+                        requested_section=req_sec,
+                        top_section=fused[0].section_number if fused else None,
+                    )
 
                 # 4. Rerank fused candidates
                 try:

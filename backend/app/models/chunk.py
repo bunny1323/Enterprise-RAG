@@ -38,8 +38,11 @@ class Chunk(BaseModel):
     assistant_id: str = Field(default="default", description="Assistant identifier")
     knowledge_base_id: str = Field(default="default", description="Knowledge base identifier")
     content_hash: str | None = Field(default=None, description="Deterministic hash of chunk content")
-    section: str | None = Field(default=None, description="Section heading")
+    section: str | None = Field(default=None, description="Section heading (human-readable display label)")
     subsection: str | None = Field(default=None, description="Subsection heading")
+    section_number: int | None = Field(default=None, description="Parsed section number (e.g. 3 for SECTION 3 HYDRAULIC SYSTEM)")
+    section_title: str | None = Field(default=None, description="Canonical section title e.g. 'HYDRAULIC SYSTEM'")
+    file_name: str | None = Field(default=None, description="Original uploaded filename")
     context_prefix: str | None = Field(default=None, description="Document + Section contextual prefix")
     embedding_representation: str = Field(default="text", description="Representation type (text | image | text_summary_of_image)")
     access_classification: str = Field(

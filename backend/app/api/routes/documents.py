@@ -4,14 +4,13 @@ POST /api/v1/documents      — upload PDF, get document_id in <100ms
 GET  /api/v1/documents/{id}/status — poll ingestion status
 """
 import uuid
-from typing import Annotated
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile, status
 
 from app.api.dependencies import PostgresDep, SupervisorDep, TenantContextDep, get_supervisor
 from app.agents.supervisor.agent import IngestionSupervisor
 from app.config.logging import get_logger
-from app.infrastructure.postgres.client import PostgresClient
 from app.models.document import DocumentStatusResponse
 
 logger = get_logger(__name__)
@@ -197,4 +196,61 @@ async def list_documents(
         "count": len(rows),
         "limit": limit,
         "offset": offset,
+    }
+
+
+@router.delete(
+    "/{document_id}",
+    status_code=status.HTTP_200_OK,
+    summary="Delete document and purge from all storage backends",
+)
+async def delete_document(
+    document_id: str,
+    postgres: PostgresDep,
+    tenant_ctx: TenantContextDep,
+    request: Request,
+) -> dict[str, Any]:
+    """
+    Completely delete a document:
+    1. Cascading delete from PostgreSQL (documents, chunks, jobs, document_structure)
+    2. Purge from Weaviate vector database
+    3. Purge from Neo4j knowledge graph
+    """
+    try:
+        doc_uuid = uuid.UUID(document_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid document_id format: {document_id}",
+        )
+
+    # 1. Delete from Weaviate
+    try:
+        weaviate_client = request.app.state.weaviate
+        weaviate_client.delete_by_document(document_id=document_id, tenant_id=tenant_ctx.tenant_id)
+    except Exception as e:
+        logger.warning("documents.weaviate_delete_warning", error=str(e), document_id=document_id)
+
+    # 2. Delete from Neo4j
+    try:
+        neo4j_client = request.app.state.neo4j
+        await neo4j_client.delete_document(document_id=document_id, tenant_id=tenant_ctx.tenant_id)
+    except Exception as e:
+        logger.warning("documents.neo4j_delete_warning", error=str(e), document_id=document_id)
+
+    # 3. Delete from PostgreSQL (cascades chunks, jobs, and document_structure)
+    deleted = await postgres.execute(
+        """
+        DELETE FROM documents
+        WHERE id = $1 AND tenant_id = $2 AND knowledge_base_id = $3
+        """,
+        doc_uuid,
+        tenant_ctx.tenant_id,
+        tenant_ctx.knowledge_base_id,
+    )
+
+    return {
+        "status": "deleted",
+        "document_id": document_id,
+        "detail": "Purged from PostgreSQL, Weaviate, and Neo4j.",
     }

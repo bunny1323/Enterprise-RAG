@@ -213,6 +213,22 @@ class Neo4jClient:
             records = await result.data()
             return records
 
+    async def delete_document(self, document_id: str, tenant_id: str = "default") -> None:
+        """Delete document node and all associated sections/chunks."""
+        driver = self._require_driver()
+        async with driver.session() as session:
+            await session.run(
+                """
+                MATCH (d:Document {id: $doc_id, tenant_id: $tenant_id})
+                OPTIONAL MATCH (d)-[:HAS_SECTION]->(s:Section)
+                OPTIONAL MATCH (s)-[:CONTAINS_CHUNK]->(c:Chunk)
+                DETACH DELETE d, s, c
+                """,
+                doc_id=document_id,
+                tenant_id=tenant_id,
+            )
+        logger.info("neo4j.document_deleted", document_id=document_id, tenant_id=tenant_id)
+
     async def verify_connectivity(self) -> bool:
         """Return True if driver can reach Neo4j server."""
         try:

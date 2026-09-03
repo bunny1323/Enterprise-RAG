@@ -69,11 +69,11 @@ class Settings(BaseSettings):
     ollama_base_url: str = Field(default="http://localhost:11434")
     ollama_vision_model: str = Field(default="llava:13b")
     ollama_model: str = Field(default="qwen2.5:7b")
-    ollama_timeout: float = Field(default=15.0, gt=0, validation_alias=AliasChoices("OLLAMA_TIMEOUT", "LLM_FALLBACK_TIMEOUT"))
+    ollama_timeout: float = Field(default=60.0, gt=0, validation_alias=AliasChoices("OLLAMA_TIMEOUT", "LLM_FALLBACK_TIMEOUT"))
 
     # Generation LLM. Groq is Primary, Ollama is Fallback.
     llm_provider: str = Field(default="groq")
-    llm_model: str = Field(default="llama-3.3-70b-versatile", validation_alias=AliasChoices("LLM_MODEL", "GROQ_MODEL"))
+    llm_model: str = Field(default="llama-3.1-8b-instant", validation_alias=AliasChoices("LLM_MODEL", "GROQ_MODEL"))
     llm_base_url: str = Field(default="", validation_alias=AliasChoices("LLM_BASE_URL", "GROQ_BASE_URL"))
     llm_api_key: str = Field(
         default="",
@@ -119,10 +119,10 @@ class Settings(BaseSettings):
 _settings: Settings | None = None
 
 
-def get_settings() -> Settings:
+def get_settings(reload: bool = False) -> Settings:
     global _settings
 
-    if _settings is None:
+    if _settings is None or reload:
         _settings = Settings()
 
     return _settings

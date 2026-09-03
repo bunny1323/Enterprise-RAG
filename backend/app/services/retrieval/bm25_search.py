@@ -50,6 +50,10 @@ class BM25SearchService:
                     page_number=int(r.get("page_number", 0)),
                     document_id=r.get("document_id", ""),
                     chunk_type=r.get("chunk_type", "TEXT"),
+                    section=r.get("section") or None,
+                    section_number=r.get("section_number"),
+                    section_title=r.get("section_title") or None,
+                    file_name=r.get("file_name") or None,
                     context_prefix=r.get("context_prefix"),
                     metadata=r,
                 )

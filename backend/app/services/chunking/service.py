@@ -12,6 +12,7 @@ from uuid import UUID
 
 from app.config.logging import get_logger
 from app.models.chunk import Chunk, ChunkType
+from app.models.structure import StructureEntry
 from app.utils.hashing import compute_chunk_hash
 
 logger = get_logger(__name__)
@@ -48,12 +49,25 @@ class ChunkingService:
         assistant_id: str = "default",
         knowledge_base_id: str = "default",
         filename: str = "document.pdf",
-    ) -> list[Chunk]:
+    ) -> tuple[list[Chunk], list[StructureEntry]]:
         """
         Produce hierarchical chunks from a parsed document with multi-tenancy.
+
+        Returns:
+            (chunks, structure_entries) where structure_entries contains
+            section headers and page-format explanations for the structure index.
         """
         all_chunks: list[Chunk] = []
+        structure_entries: list[StructureEntry] = []
         doc_str = str(document_id)
+
+        # Mutable section context that persists across ALL pages (sections span pages)
+        section_ctx: dict = {
+            "number": None,   # int | None — current section number
+            "title": None,    # str | None — e.g. "HYDRAULIC SYSTEM"
+            "label": None,    # str — human-readable label
+            "idx": 0,         # monotonic chunk index within document
+        }
 
         for page_data in parsed_doc.get("pages", []):
             page_num: int = page_data.get("page_num", 0)
@@ -62,7 +76,7 @@ class ChunkingService:
             figures: list[dict] = page_data.get("figures", [])
 
             # ── Text chunking (parent → children) ─────────────────────────────
-            parent_chunks = self._make_parent_chunks(
+            new_sections, parent_chunks = self._make_parent_chunks_with_structure(
                 text_blocks=text_blocks,
                 page_num=page_num,
                 doc_str=doc_str,
@@ -72,7 +86,9 @@ class ChunkingService:
                 assistant_id=assistant_id,
                 knowledge_base_id=knowledge_base_id,
                 filename=filename,
+                section_ctx=section_ctx,
             )
+            structure_entries.extend(new_sections)
             for parent in parent_chunks:
                 if self._validate_chunk(parent):
                     all_chunks.append(parent)
@@ -87,6 +103,13 @@ class ChunkingService:
                     )
                     all_chunks.extend([c for c in children if self._validate_chunk(c)])
 
+            # ── Page-format detection (first 3 pages only) ─────────────────────
+            # Look for patterns like "2-3" near text explaining "item number" /
+            # "consecutive page". Only scan early pages to stay efficient.
+            if page_num <= 3:
+                pf_entries = self._detect_page_format_entries(text_blocks, page_num)
+                structure_entries.extend(pf_entries)
+
             # ── Table chunks ───────────────────────────────────────────────────
             for table in tables:
                 chunk = self._make_table_chunk(
@@ -99,6 +122,7 @@ class ChunkingService:
                     assistant_id=assistant_id,
                     knowledge_base_id=knowledge_base_id,
                     filename=filename,
+                    section_ctx=section_ctx,
                 )
                 if self._validate_chunk(chunk):
                     all_chunks.append(chunk)
@@ -115,6 +139,7 @@ class ChunkingService:
                     assistant_id=assistant_id,
                     knowledge_base_id=knowledge_base_id,
                     filename=filename,
+                    section_ctx=section_ctx,
                 )
                 if chunk and self._validate_chunk(chunk):
                     all_chunks.append(chunk)
@@ -124,8 +149,173 @@ class ChunkingService:
             document_id=doc_str,
             tenant_id=tenant_id,
             total_chunks=len(all_chunks),
+            structure_entries=len(structure_entries),
         )
-        return all_chunks
+        # Deduplicate structure entries (same section number seen on multiple pages
+        # is only stored once — keep the first occurrence with lowest page_number)
+        structure_entries = self._deduplicate_structure_entries(structure_entries)
+        return all_chunks, structure_entries
+
+    # ── Structure-aware parent chunk creation (emits structure entries too) ──────
+
+    def _make_parent_chunks_with_structure(
+        self,
+        text_blocks: list[dict],
+        page_num: int,
+        doc_str: str,
+        document_id: UUID,
+        industry: str,
+        tenant_id: str,
+        assistant_id: str,
+        knowledge_base_id: str,
+        filename: str,
+        section_ctx: dict,
+    ) -> tuple[list[StructureEntry], list[Chunk]]:
+        """Same as _make_parent_chunks but also returns StructureEntry items."""
+        structure_entries: list[StructureEntry] = []
+        parents: list[Chunk] = []
+        current_texts: list[str] = []
+        current_bboxes: list[list[float]] = []
+        current_tokens = 0
+
+        def _flush():
+            nonlocal current_texts, current_bboxes, current_tokens
+            if not current_texts:
+                return
+            parents.append(self._flush_parent(
+                current_texts, current_bboxes, page_num, doc_str, document_id,
+                industry, tenant_id, assistant_id, knowledge_base_id, filename,
+                section_ctx,
+            ))
+            section_ctx["idx"] += 1
+            current_texts, current_bboxes, current_tokens = [], [], 0
+
+        for block in text_blocks:
+            text = block.get("text", "").strip()
+            bbox = block.get("bbox", [])
+            item_type = block.get("item_type", "TextItem")
+            if not text:
+                continue
+
+            # ── Section boundary detection ────────────────────────────────────
+            section_match = re.match(
+                r"^SECTION\s+(\d+)\s*(.*?)$", text.strip(), re.IGNORECASE
+            )
+            is_section_heading = (
+                item_type == "SectionHeaderItem" or section_match is not None
+            )
+
+            if is_section_heading and section_match:
+                _flush()
+                sec_num = int(section_match.group(1))
+                sec_title = section_match.group(2).strip().upper() or f"SECTION {sec_num}"
+                section_ctx["number"] = sec_num
+                section_ctx["title"] = sec_title
+                section_ctx["label"] = f"SECTION {sec_num} {sec_title}".strip()
+                # Emit structure entry for this section
+                structure_entries.append(StructureEntry(
+                    structure_type="section",
+                    number=sec_num,
+                    title=sec_title,
+                    raw_text=text.strip(),
+                    page_number=page_num,
+                ))
+                current_texts.append(text)
+                if bbox:
+                    current_bboxes.append(bbox)
+                current_tokens += _token_estimate(text)
+                continue
+
+            if is_section_heading and item_type == "SectionHeaderItem":
+                _flush()
+                current_texts.append(text)
+                if bbox:
+                    current_bboxes.append(bbox)
+                current_tokens += _token_estimate(text)
+                continue
+
+            if re.match(r"^(warning|caution|note|danger):?", text, re.IGNORECASE):
+                _flush()
+                current_texts.append(text)
+                if bbox:
+                    current_bboxes.append(bbox)
+                current_tokens += _token_estimate(text)
+                _flush()
+                continue
+
+            block_tokens = _token_estimate(text)
+            if current_tokens + block_tokens > _TOKEN_MAX and current_texts:
+                _flush()
+            current_texts.append(text)
+            if bbox:
+                current_bboxes.append(bbox)
+            current_tokens += block_tokens
+            if current_tokens >= _TOKEN_TARGET:
+                _flush()
+
+        _flush()
+        return structure_entries, parents
+
+    def _detect_page_format_entries(
+        self,
+        text_blocks: list[dict],
+        page_num: int,
+    ) -> list[StructureEntry]:
+        """
+        Detect page-number-format explanation blocks in early pages.
+
+        Matches passages that explain notation like "2-3" where:
+          '2' = item number
+          '3' = consecutive page number
+
+        Heuristic: must contain a digit-dash-digit pattern AND one of
+        the keywords 'item number', 'consecutive', 'page number'.
+        """
+        entries: list[StructureEntry] = []
+        # Collect all text on this page
+        page_text = " ".join(b.get("text", "") for b in text_blocks).strip()
+        if not page_text:
+            return entries
+
+        # Find all X-Y notation patterns
+        notations = re.findall(r"\b(\d+)-(\d+)\b", page_text)
+        keywords = ["item number", "consecutive", "page number", "each item"]
+        has_keyword = any(kw in page_text.lower() for kw in keywords)
+
+        if notations and has_keyword:
+            for x, y in notations:
+                notation = f"{x}-{y}"
+                entries.append(StructureEntry(
+                    structure_type="page_format",
+                    number=None,
+                    title=None,
+                    raw_text=page_text[:2000],  # store full page context (capped)
+                    page_number=page_num,
+                    metadata={
+                        "notation": notation,
+                        "item_number": x,
+                        "page_number_part": y,
+                    },
+                ))
+        return entries
+
+    def _deduplicate_structure_entries(
+        self, entries: list[StructureEntry]
+    ) -> list[StructureEntry]:
+        """Keep first occurrence of each (structure_type, number/notation) pair."""
+        seen: set[tuple] = set()
+        deduped: list[StructureEntry] = []
+        for e in entries:
+            if e.structure_type == "section":
+                key = ("section", e.number)
+            elif e.structure_type == "page_format":
+                key = ("page_format", e.metadata.get("notation"))
+            else:
+                key = (e.structure_type, e.title)
+            if key not in seen:
+                seen.add(key)
+                deduped.append(e)
+        return deduped
 
     def _validate_chunk(self, chunk: Chunk) -> bool:
         """Objective chunk quality validation without fake semantic scores."""
@@ -149,42 +339,92 @@ class ChunkingService:
         assistant_id: str,
         knowledge_base_id: str,
         filename: str,
+        # Section context is passed in and updated in place via a mutable dict
+        section_ctx: dict,
     ) -> list[Chunk]:
+        """Build parent chunks with structure-aware section detection.
+
+        section_ctx is a mutable dict with keys:
+            number: int | None   — current section number
+            title:  str | None   — current section title (e.g. "HYDRAULIC SYSTEM")
+            label:  str          — human-readable label for context_prefix
+            idx:    int          — monotonic parent chunk index within document
+        """
         parents: list[Chunk] = []
         current_texts: list[str] = []
         current_bboxes: list[list[float]] = []
-        section_idx = 0
         current_tokens = 0
-        current_section_name = f"Page {page_num} Section {section_idx + 1}"
+
+        def _flush():
+            nonlocal current_texts, current_bboxes, current_tokens
+            if not current_texts:
+                return
+            parents.append(self._flush_parent(
+                current_texts, current_bboxes, page_num, doc_str, document_id,
+                industry, tenant_id, assistant_id, knowledge_base_id, filename,
+                section_ctx,
+            ))
+            section_ctx["idx"] += 1
+            current_texts, current_bboxes, current_tokens = [], [], 0
 
         for block in text_blocks:
             text = block.get("text", "").strip()
             bbox = block.get("bbox", [])
+            item_type = block.get("item_type", "TextItem")
             if not text:
                 continue
 
-            # Detect content types (Warnings, Procedures, Specs)
-            if re.match(r"^(warning|caution|note|danger):?", text, re.IGNORECASE):
-                # Flush current and start a new block for warning to preserve it
-                if current_texts:
-                    parents.append(self._flush_parent(
-                        current_texts, current_bboxes, page_num, doc_str, document_id, 
-                        industry, tenant_id, assistant_id, knowledge_base_id, filename, current_section_name, section_idx
-                    ))
-                    current_texts, current_bboxes, current_tokens = [], [], 0
-                    section_idx += 1
-                current_section_name = "Warning/Note"
+            # ── Section boundary detection ────────────────────────────────────
+            # ONLY trigger on SectionHeaderItem OR explicit "SECTION N TITLE" pattern.
+            # "3. CONVERSION TABLE" (numbered list item) is intentionally NOT matched.
+            section_match = re.match(
+                r"^SECTION\s+(\d+)\s*(.*?)$", text.strip(), re.IGNORECASE
+            )
+            is_section_heading = (
+                item_type == "SectionHeaderItem" or section_match is not None
+            )
 
+            if is_section_heading and section_match:
+                # Flush accumulated text before starting a new section
+                _flush()
+                sec_num = int(section_match.group(1))
+                sec_title = section_match.group(2).strip().upper() or f"SECTION {sec_num}"
+                section_ctx["number"] = sec_num
+                section_ctx["title"] = sec_title
+                section_ctx["label"] = f"SECTION {sec_num} {sec_title}".strip()
+                # Include the heading text itself in the new chunk
+                current_texts.append(text)
+                if bbox:
+                    current_bboxes.append(bbox)
+                current_tokens += _token_estimate(text)
+                continue
+
+            if is_section_heading and item_type == "SectionHeaderItem":
+                # SectionHeaderItem but didn't match our SECTION N pattern —
+                # treat as a subsection/sub-heading: flush and start a new parent
+                # but keep current section_ctx.number / title unchanged.
+                _flush()
+                current_texts.append(text)
+                if bbox:
+                    current_bboxes.append(bbox)
+                current_tokens += _token_estimate(text)
+                continue
+
+            # ── Warning / special block ───────────────────────────────────────
+            if re.match(r"^(warning|caution|note|danger):?", text, re.IGNORECASE):
+                _flush()
+                current_texts.append(text)
+                if bbox:
+                    current_bboxes.append(bbox)
+                current_tokens += _token_estimate(text)
+                _flush()
+                continue
+
+            # ── Normal body text accumulation ─────────────────────────────────
             block_tokens = _token_estimate(text)
-            
+
             if current_tokens + block_tokens > _TOKEN_MAX and current_texts:
-                parents.append(self._flush_parent(
-                    current_texts, current_bboxes, page_num, doc_str, document_id, 
-                    industry, tenant_id, assistant_id, knowledge_base_id, filename, current_section_name, section_idx
-                ))
-                current_texts, current_bboxes, current_tokens = [], [], 0
-                section_idx += 1
-                current_section_name = f"Page {page_num} Section {section_idx + 1}"
+                _flush()
 
             current_texts.append(text)
             if bbox:
@@ -192,21 +432,11 @@ class ChunkingService:
             current_tokens += block_tokens
 
             if current_tokens >= _TOKEN_TARGET:
-                parents.append(self._flush_parent(
-                    current_texts, current_bboxes, page_num, doc_str, document_id, 
-                    industry, tenant_id, assistant_id, knowledge_base_id, filename, current_section_name, section_idx
-                ))
-                current_texts, current_bboxes, current_tokens = [], [], 0
-                section_idx += 1
-                current_section_name = f"Page {page_num} Section {section_idx + 1}"
+                _flush()
 
-        if current_texts:
-            parents.append(self._flush_parent(
-                current_texts, current_bboxes, page_num, doc_str, document_id, 
-                industry, tenant_id, assistant_id, knowledge_base_id, filename, current_section_name, section_idx
-            ))
-
+        _flush()
         return parents
+
 
     def _flush_parent(
         self,
@@ -220,14 +450,20 @@ class ChunkingService:
         assistant_id: str,
         knowledge_base_id: str,
         filename: str,
-        section_name: str,
-        section_idx: int,
+        section_ctx: dict,
     ) -> Chunk:
         content = "\n".join(texts)
         merged_bbox = self._merge_bboxes(bboxes) if bboxes else None
-        chunk_id = f"{doc_str}::p{page_num}::s{section_idx}"
+        chunk_idx = section_ctx.get("idx", 0)
+        chunk_id = f"{doc_str}::p{page_num}::s{chunk_idx}"
         c_hash = compute_chunk_hash(content)
-        ctx_prefix = f"{filename} > Page {page_num} > {section_name}"
+
+        sec_num = section_ctx.get("number")
+        sec_title = section_ctx.get("title")
+        sec_label = section_ctx.get("label") or (
+            f"SECTION {sec_num} {sec_title}".strip() if sec_num else f"Page {page_num}"
+        )
+        ctx_prefix = f"{filename} > {sec_label} > Page {page_num}"
 
         return Chunk(
             chunk_id=chunk_id,
@@ -238,14 +474,17 @@ class ChunkingService:
             knowledge_base_id=knowledge_base_id,
             content=content,
             content_hash=c_hash,
-            section=section_name,
+            section=sec_label,
+            section_number=sec_num,
+            section_title=sec_title,
+            file_name=filename,
             context_prefix=ctx_prefix,
             embedding_representation="text",
             page_number=page_num,
             bounding_box=merged_bbox,
             chunk_type=ChunkType.TEXT,
             industry_domain=industry,
-            hierarchy_path=f"doc.page{page_num}.section{section_idx}",
+            hierarchy_path=f"doc.section{sec_num or 0}.page{page_num}.chunk{chunk_idx}",
         )
 
     # ── Child chunk creation ───────────────────────────────────────────────────
@@ -319,6 +558,9 @@ class ChunkingService:
             content=content,
             content_hash=c_hash,
             section=parent.section,
+            section_number=parent.section_number,
+            section_title=parent.section_title,
+            file_name=parent.file_name,
             context_prefix=ctx_prefix,
             embedding_representation="text",
             page_number=parent.page_number,
@@ -341,12 +583,17 @@ class ChunkingService:
         assistant_id: str,
         knowledge_base_id: str,
         filename: str,
+        section_ctx: dict | None = None,
     ) -> Chunk:
         markdown = table.get("markdown", "")
         c_hash = compute_chunk_hash(markdown)
         table_hash_id = c_hash[:12]
         chunk_id = f"{doc_str}::p{page_num}::t{table_hash_id}"
-        ctx_prefix = f"{filename} > Page {page_num} > Table {table_hash_id}"
+        sec_ctx = section_ctx or {}
+        sec_num = sec_ctx.get("number")
+        sec_title = sec_ctx.get("title")
+        sec_label = sec_ctx.get("label") or f"Page {page_num}"
+        ctx_prefix = f"{filename} > {sec_label} > Page {page_num} > Table"
 
         return Chunk(
             chunk_id=chunk_id,
@@ -357,14 +604,17 @@ class ChunkingService:
             knowledge_base_id=knowledge_base_id,
             content=markdown,
             content_hash=c_hash,
-            section=f"Table Page {page_num}",
+            section=sec_label,
+            section_number=sec_num,
+            section_title=sec_title,
+            file_name=filename,
             context_prefix=ctx_prefix,
             embedding_representation="text",
             page_number=page_num,
             bounding_box=table.get("bbox"),
             chunk_type=ChunkType.TABLE,
             industry_domain=industry,
-            hierarchy_path=f"doc.page{page_num}.table_{table_hash_id}",
+            hierarchy_path=f"doc.section{sec_num or 0}.page{page_num}.table_{table_hash_id}",
         )
 
     # ── Figure chunks (Deterministic IDs) ──────────────────────────────────────
@@ -380,6 +630,7 @@ class ChunkingService:
         assistant_id: str,
         knowledge_base_id: str,
         filename: str,
+        section_ctx: dict | None = None,
     ) -> Chunk | None:
         vision_data: dict = figure.get("vision_analysis", {})
         caption: str = figure.get("caption", "")
@@ -407,7 +658,11 @@ class ChunkingService:
 
         chunk_type = ChunkType.DIAGRAM if vision_data else ChunkType.IMAGE
         representation = "image" if image_path else "text_summary_of_image"
-        ctx_prefix = f"{filename} > Page {page_num} > Figure {fig_hash_id}"
+        sec_ctx = section_ctx or {}
+        sec_num = sec_ctx.get("number")
+        sec_title = sec_ctx.get("title")
+        sec_label = sec_ctx.get("label") or f"Page {page_num}"
+        ctx_prefix = f"{filename} > {sec_label} > Page {page_num} > Figure"
 
         return Chunk(
             chunk_id=chunk_id,
@@ -418,14 +673,17 @@ class ChunkingService:
             knowledge_base_id=knowledge_base_id,
             content=content,
             content_hash=c_hash,
-            section=f"Figure Page {page_num}",
+            section=sec_label,
+            section_number=sec_num,
+            section_title=sec_title,
+            file_name=filename,
             context_prefix=ctx_prefix,
             embedding_representation=representation,
             page_number=page_num,
             bounding_box=figure.get("bbox"),
             chunk_type=chunk_type,
             industry_domain=industry,
-            hierarchy_path=f"doc.page{page_num}.figure_{fig_hash_id}",
+            hierarchy_path=f"doc.section{sec_num or 0}.page{page_num}.figure_{fig_hash_id}",
             metadata={"image_path": image_path, "vision_analysis": vision_data},
         )
 

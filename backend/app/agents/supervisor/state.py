@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from app.models.chunk import Chunk
 from app.models.document import DocumentStatus
+from app.models.structure import StructureEntry
 
 
 class IngestionState(BaseModel):
@@ -57,6 +58,10 @@ class IngestionState(BaseModel):
     )
     vectors: list[list[float]] | None = Field(
         default=None, description="384-dim BGE (BAAI/bge-small-en-v1.5) vectors (set by step 07)"
+    )
+    structure_entries: list[StructureEntry] = Field(
+        default_factory=list,
+        description="Structural elements extracted during chunking (sections, page-format entries)",
     )
 
     # ── Resumability & Checkpointing ────────────────────────────────────────────

@@ -21,6 +21,7 @@ def build_query_graph(nodes: QueryNodes, checkpointer: BaseCheckpointSaver | Non
     workflow.add_node("policy", nodes.evaluate_policy)
     workflow.add_node("cache", nodes.check_cache)
     workflow.add_node("retrieve", nodes.retrieve_evidence)
+    workflow.add_node("answerability", nodes.check_answerability)
     workflow.add_node("refine", nodes.refine_query)
     workflow.add_node("generate", nodes.generate_response)
     workflow.add_node("verify", nodes.verify_citations)
@@ -39,7 +40,11 @@ def build_query_graph(nodes: QueryNodes, checkpointer: BaseCheckpointSaver | Non
             return END
         return "retrieve"
 
-    def route_after_retrieve(state: QueryWorkflowState) -> Literal["generate", "refine"]:
+    def route_after_answerability(state: QueryWorkflowState) -> Literal["generate", "refine", "verify"]:
+        if state.get("answerable") is False and state.get("answer"):
+            # Unanswerable with insufficient evidence: jump straight to verify to return clean refusal
+            return "verify"
+
         conf = state.get("confidence_level", "LOW")
         retries = state.get("retries", 0)
         
@@ -60,7 +65,8 @@ def build_query_graph(nodes: QueryNodes, checkpointer: BaseCheckpointSaver | Non
     # Edges
     workflow.add_conditional_edges("policy", route_after_policy)
     workflow.add_conditional_edges("cache", route_after_cache)
-    workflow.add_conditional_edges("retrieve", route_after_retrieve)
+    workflow.add_edge("retrieve", "answerability")
+    workflow.add_conditional_edges("answerability", route_after_answerability)
     
     # Refinement just loops back to retrieval
     workflow.add_edge("refine", "retrieve")

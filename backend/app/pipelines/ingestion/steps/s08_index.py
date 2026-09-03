@@ -59,6 +59,9 @@ async def step(state: IngestionState, services: dict[str, Any]) -> IngestionStat
     try:
         logger.debug("step.index.postgres_chunks_start", document_id=doc_id)
         await _insert_chunks_postgres(postgres, state.chunks)
+        # Insert document structure index entries (sections, page-format, etc.)
+        if state.structure_entries:
+            await _insert_structure_entries(postgres, state)
         pg_ok = True
         await postgres.execute(
             "UPDATE indexing_state SET postgres_chunks_status = 'COMPLETED' WHERE document_id = $1",
@@ -210,13 +213,16 @@ async def _insert_chunks_postgres(
             """
             INSERT INTO chunks (
                 chunk_id, parent_id, document_id, tenant_id, assistant_id, knowledge_base_id,
-                content, content_hash, section, subsection, context_prefix,
-                embedding_representation, page_number, bounding_box, chunk_type,
+                content, content_hash, section, subsection, section_number, section_title, file_name,
+                context_prefix, embedding_representation, page_number, bounding_box, chunk_type,
                 access_classification, industry_domain, hierarchy_path, metadata
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
             ON CONFLICT (chunk_id) DO UPDATE
             SET content               = EXCLUDED.content,
                 content_hash          = EXCLUDED.content_hash,
+                section_number        = EXCLUDED.section_number,
+                section_title         = EXCLUDED.section_title,
+                file_name             = EXCLUDED.file_name,
                 context_prefix        = EXCLUDED.context_prefix,
                 metadata              = EXCLUDED.metadata
             """,
@@ -230,6 +236,9 @@ async def _insert_chunks_postgres(
             chunk.content_hash,
             chunk.section,
             chunk.subsection,
+            chunk.section_number,
+            chunk.section_title,
+            chunk.file_name,
             chunk.context_prefix,
             chunk.embedding_representation,
             chunk.page_number,
@@ -241,3 +250,37 @@ async def _insert_chunks_postgres(
             chunk.metadata,
         )
 
+
+async def _insert_structure_entries(
+    postgres: PostgresClient,
+    state: Any,
+) -> None:
+    """Insert document structure entries (sections, page-format) into document_structure table.
+
+    Uses ON CONFLICT DO NOTHING so re-indexing the same document is idempotent
+    (same document_id + structure_type + number won't duplicate).
+    """
+    for entry in state.structure_entries:
+        await postgres.execute(
+            """
+            INSERT INTO document_structure (
+                document_id, tenant_id, knowledge_base_id,
+                structure_type, number, title, raw_text, page_number, metadata
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT DO NOTHING
+            """,
+            state.document_id,
+            state.tenant_id,
+            state.knowledge_base_id,
+            entry.structure_type,
+            entry.number,
+            entry.title,
+            entry.raw_text,
+            entry.page_number,
+            entry.metadata,
+        )
+    logger.info(
+        "step.index.structure_entries_inserted",
+        document_id=str(state.document_id),
+        count=len(state.structure_entries),
+    )

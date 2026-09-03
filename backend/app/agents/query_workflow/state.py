@@ -38,6 +38,11 @@ class QueryWorkflowState(TypedDict):
     sources: list[SourceRef]
     verification_status: str
     
+    # Coverage & Strict Grounding
+    evidence_coverage: str
+    answerable: bool
+    retrieval_trace: dict[str, Any]
+
     # Metadata
     trace_id: str
     latency_ms: int

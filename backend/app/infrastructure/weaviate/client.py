@@ -57,10 +57,14 @@ class WeaviateClient:
     # ── Schema ─────────────────────────────────────────────────────────────────
 
     def init_schema(self) -> None:
-        """Create the DocumentChunk collection if it does not already exist."""
+        """Create the DocumentChunk collection if it does not already exist.
+        If it exists, safely add any new properties that may be missing.
+        """
         client = self._require_client()
         if client.collections.exists(_COLLECTION_NAME):
             logger.info("weaviate.collection_exists", name=_COLLECTION_NAME)
+            # Add any new properties to the existing collection without recreating it
+            self._ensure_properties(client.collections.get(_COLLECTION_NAME))
             return
 
         client.collections.create(
@@ -141,9 +145,60 @@ class WeaviateClient:
                     description="Dot-separated hierarchy path",
                     skip_vectorization=True,
                 ),
+                wvc.config.Property(
+                    name="section",
+                    data_type=wvc.config.DataType.TEXT,
+                    description="Human-readable section label",
+                ),
+                wvc.config.Property(
+                    name="section_number",
+                    data_type=wvc.config.DataType.INT,
+                    description="Parsed section number (e.g. 3 for SECTION 3)",
+                    skip_vectorization=True,
+                ),
+                wvc.config.Property(
+                    name="section_title",
+                    data_type=wvc.config.DataType.TEXT,
+                    description="Canonical section title e.g. HYDRAULIC SYSTEM",
+                ),
+                wvc.config.Property(
+                    name="file_name",
+                    data_type=wvc.config.DataType.TEXT,
+                    description="Original uploaded filename",
+                    skip_vectorization=True,
+                ),
             ],
         )
         logger.info("weaviate.collection_created", name=_COLLECTION_NAME)
+
+
+    def _ensure_properties(self, collection: Any) -> None:
+        """Add missing properties to an existing collection without recreating it."""
+        try:
+            existing = {p.name for p in collection.config.get().properties}
+        except Exception:
+            existing = set()
+
+        additions = [
+            ("section",        wvc.config.DataType.TEXT, "Human-readable section label",     False),
+            ("section_title",  wvc.config.DataType.TEXT, "Canonical section title",           False),
+            ("file_name",      wvc.config.DataType.TEXT, "Original uploaded filename",        True),
+            ("section_number", wvc.config.DataType.INT,  "Parsed section number",             True),
+        ]
+        for name, dtype, desc, skip_vec in additions:
+            if name not in existing:
+                try:
+                    collection.config.add_property(
+                        wvc.config.Property(
+                            name=name,
+                            data_type=dtype,
+                            description=desc,
+                            skip_vectorization=skip_vec,
+                        )
+                    )
+                    logger.info("weaviate.property_added", name=name)
+                except Exception as e:
+                    logger.warning("weaviate.property_add_failed", name=name, error=str(e))
 
     def get_collection_dimension(self) -> int | None:
         """Fetch one object with its vector to determine the actual vector dimension."""
@@ -216,6 +271,10 @@ class WeaviateClient:
                     "access_classification": chunk.access_classification,
                     "bounding_box": json.dumps(chunk.bounding_box) if chunk.bounding_box else "[]",
                     "hierarchy_path": chunk.hierarchy_path,
+                    "section": chunk.section or "",
+                    "section_number": chunk.section_number,
+                    "section_title": chunk.section_title or "",
+                    "file_name": chunk.file_name or "",
                 }
                 batch.add_object(properties=properties, vector=vector)
 

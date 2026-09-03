@@ -38,7 +38,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     Application lifespan manager.
     Everything before `yield` runs at startup; everything after at shutdown.
     """
-    settings = get_settings()
+    settings = get_settings(reload=True)
     configure_logging(debug=settings.debug)
     logger = get_logger(__name__)
 
@@ -251,5 +251,5 @@ def create_app() -> FastAPI:
     return app
 
 
-# Module-level app instance for uvicorn
+# Module-level app instance for uvicorn (reloaded with safe Groq model fallback)
 app = create_app()

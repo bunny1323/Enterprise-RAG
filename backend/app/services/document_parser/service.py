@@ -113,7 +113,12 @@ def _run_docling_in_process_queue(file_path: str, profile: str, result_queue: mp
                 text = getattr(item, "text", "") or ""
                 bbox = _extract_bbox(item)
                 if text.strip():
-                    _get_page(page_num)["text_blocks"].append({"text": text, "bbox": bbox, "page_num": page_num})
+                    _get_page(page_num)["text_blocks"].append({
+                        "text": text,
+                        "bbox": bbox,
+                        "page_num": page_num,
+                        "item_type": item_type,  # preserve so chunker can detect section headings
+                    })
 
             elif item_type == "TableItem":
                 stats["table_pages"].add(page_num)
@@ -258,12 +263,24 @@ class DocumentParserService:
                 if block.get("type") != 0:
                     continue
                 lines = block.get("lines", [])
-                text = " ".join(
-                    span.get("text", "") for line in lines for span in line.get("spans", [])
-                ).strip()
-                if text:
-                    b = block.get("bbox", [0, 0, 0, 0])
-                    text_blocks.append({"text": text, "bbox": list(b), "page_num": page_num})
+                spans = [span for line in lines for span in line.get("spans", [])]
+                text = " ".join(span.get("text", "") for span in spans).strip()
+                if not text:
+                    continue
+                b = block.get("bbox", [0, 0, 0, 0])
+
+                # Heuristic: detect section headings by font size or ALL-CAPS pattern
+                max_font_size = max((span.get("size", 0) for span in spans), default=0)
+                import re as _re
+                _is_section_heading = (
+                    max_font_size >= 11  # larger-than-body font
+                    and (
+                        bool(_re.match(r"^SECTION\s+\d+", text.upper()))
+                        or (text == text.upper() and len(text.split()) <= 8 and len(text) >= 4)
+                    )
+                )
+                item_type = "SectionHeaderItem" if _is_section_heading else "TextItem"
+                text_blocks.append({"text": text, "bbox": list(b), "page_num": page_num, "item_type": item_type})
 
             pages.append({"page_num": page_num, "text_blocks": text_blocks, "tables": [], "figures": []})
 

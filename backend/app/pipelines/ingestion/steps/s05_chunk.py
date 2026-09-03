@@ -33,7 +33,7 @@ async def step(state: IngestionState, services: dict[str, Any]) -> IngestionStat
 
     chunker: ChunkingService = services["chunker"]
 
-    chunks = chunker.chunk(
+    chunks, structure_entries = chunker.chunk(
         parsed_doc=state.parsed_doc,
         document_id=state.document_id,
         industry=state.industry,
@@ -54,12 +54,14 @@ async def step(state: IngestionState, services: dict[str, Any]) -> IngestionStat
         "step.chunk.complete",
         document_id=str(state.document_id),
         total=len(chunks),
+        structure_entries=len(structure_entries),
         **type_counts,
     )
 
     return state.model_copy(
         update={
             "chunks": chunks,
+            "structure_entries": structure_entries,
             "status": DocumentStatus.CHUNKING,
         }
     )

@@ -111,6 +111,20 @@ CREATE TABLE IF NOT EXISTS embedding_cache (
     created_at            TIMESTAMPTZ DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS document_structure (
+    id                    SERIAL      PRIMARY KEY,
+    document_id           UUID        REFERENCES documents(id) ON DELETE CASCADE,
+    tenant_id             TEXT        NOT NULL DEFAULT 'default',
+    knowledge_base_id     TEXT        NOT NULL DEFAULT 'default',
+    structure_type        TEXT        NOT NULL,  -- 'section' | 'page_format' | 'figure_ref' | 'table_ref'
+    number                INTEGER,               -- section number (1-9 etc.)
+    title                 TEXT,                  -- e.g. 'HYDRAULIC SYSTEM'
+    raw_text              TEXT,                  -- verbatim source text
+    page_number           INTEGER,
+    metadata              JSONB       DEFAULT '{}',
+    created_at            TIMESTAMPTZ DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS knowledge_base_versions (
     knowledge_base_id     TEXT        NOT NULL,
     tenant_id             TEXT        NOT NULL,
@@ -132,12 +146,18 @@ CREATE INDEX IF NOT EXISTS idx_chunks_document ON chunks(document_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_type     ON chunks(chunk_type);
 CREATE INDEX IF NOT EXISTS idx_chunks_tenant   ON chunks(tenant_id, knowledge_base_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_content_hash ON chunks(content_hash);
+CREATE INDEX IF NOT EXISTS idx_chunks_section_number ON chunks(section_number);
 
 CREATE INDEX IF NOT EXISTS idx_jobs_document ON ingestion_jobs(document_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_tenant   ON ingestion_jobs(tenant_id, knowledge_base_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_status   ON ingestion_jobs(status);
 
 CREATE INDEX IF NOT EXISTS idx_embed_cache_hash ON embedding_cache(content_hash, embedding_model);
+
+CREATE INDEX IF NOT EXISTS idx_doc_struct_doc ON document_structure(document_id);
+CREATE INDEX IF NOT EXISTS idx_doc_struct_type ON document_structure(structure_type);
+CREATE INDEX IF NOT EXISTS idx_doc_struct_tenant ON document_structure(tenant_id, knowledge_base_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_doc_struct_unique ON document_structure(document_id, structure_type, number, title);
 """
 
 class PostgresClient:
@@ -230,12 +250,18 @@ class PostgresClient:
             "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS content_hash TEXT",
             "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS section TEXT",
             "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS subsection TEXT",
+            "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS section_number INTEGER",
+            "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS section_title TEXT",
+            "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS file_name TEXT",
             "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS context_prefix TEXT",
             "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS embedding_representation TEXT DEFAULT 'text'",
             # ── ingestion_jobs table ─────────────────────────────────────────
             "ALTER TABLE ingestion_jobs ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'",
             "ALTER TABLE ingestion_jobs ADD COLUMN IF NOT EXISTS assistant_id TEXT NOT NULL DEFAULT 'default'",
             "ALTER TABLE ingestion_jobs ADD COLUMN IF NOT EXISTS knowledge_base_id TEXT NOT NULL DEFAULT 'default'",
+            # ── document_structure table (new) ───────────────────────────────
+            # Table is created by DDL above; these are safety guards for old deploys
+            "ALTER TABLE document_structure ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'",
         ]
         for sql in migrations:
             try:
@@ -318,6 +344,115 @@ class PostgresClient:
                 error=str(err),
                 mitigation="Runtime ingestion checks will enforce uniqueness; operator must resolve duplicates"
             )
+
+    # ── Document Structure Helpers ─────────────────────────────────────────────
+
+    async def get_sections(
+        self,
+        tenant_id: str,
+        knowledge_base_id: str,
+        document_id: str | None = None,
+    ) -> list[dict]:
+        """Return all section entries from document_structure, ordered by section number."""
+        if document_id:
+            return await self.fetch(
+                """
+                SELECT id, document_id, number, title, raw_text, page_number, metadata
+                FROM document_structure
+                WHERE structure_type = 'section'
+                  AND tenant_id = $1
+                  AND knowledge_base_id = $2
+                  AND document_id = $3::uuid
+                ORDER BY number ASC
+                """,
+                tenant_id,
+                knowledge_base_id,
+                document_id,
+            )
+        return await self.fetch(
+            """
+            SELECT id, document_id, number, title, raw_text, page_number, metadata
+            FROM document_structure
+            WHERE structure_type = 'section'
+              AND tenant_id = $1
+              AND knowledge_base_id = $2
+            ORDER BY number ASC
+            """,
+            tenant_id,
+            knowledge_base_id,
+        )
+
+    async def count_sections(
+        self,
+        tenant_id: str,
+        knowledge_base_id: str,
+        document_id: str | None = None,
+    ) -> int:
+        """Return the count of unique major sections in document_structure."""
+        if document_id:
+            val = await self.fetchval(
+                """
+                SELECT COUNT(DISTINCT number)
+                FROM document_structure
+                WHERE structure_type = 'section'
+                  AND tenant_id = $1
+                  AND knowledge_base_id = $2
+                  AND document_id = $3::uuid
+                  AND number IS NOT NULL
+                """,
+                tenant_id,
+                knowledge_base_id,
+                document_id,
+            )
+        else:
+            val = await self.fetchval(
+                """
+                SELECT COUNT(DISTINCT number)
+                FROM document_structure
+                WHERE structure_type = 'section'
+                  AND tenant_id = $1
+                  AND knowledge_base_id = $2
+                  AND number IS NOT NULL
+                """,
+                tenant_id,
+                knowledge_base_id,
+            )
+        return int(val or 0)
+
+    async def get_page_format_entries(
+        self,
+        tenant_id: str,
+        knowledge_base_id: str,
+        notation: str | None = None,
+    ) -> list[dict]:
+        """Return page-format explanation entries, optionally filtering by notation."""
+        if notation:
+            return await self.fetch(
+                """
+                SELECT id, document_id, raw_text, page_number, metadata
+                FROM document_structure
+                WHERE structure_type = 'page_format'
+                  AND tenant_id = $1
+                  AND knowledge_base_id = $2
+                  AND (raw_text ILIKE $3 OR metadata::text ILIKE $3)
+                ORDER BY page_number ASC
+                """,
+                tenant_id,
+                knowledge_base_id,
+                f"%{notation}%",
+            )
+        return await self.fetch(
+            """
+            SELECT id, document_id, raw_text, page_number, metadata
+            FROM document_structure
+            WHERE structure_type = 'page_format'
+              AND tenant_id = $1
+              AND knowledge_base_id = $2
+            ORDER BY page_number ASC
+            """,
+            tenant_id,
+            knowledge_base_id,
+        )
 
     async def close(self) -> None:
         """Drain and close the connection pool."""
