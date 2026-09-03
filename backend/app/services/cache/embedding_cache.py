@@ -1,7 +1,7 @@
 """
 PostgreSQL-backed Embedding Cache.
 Key: SHA-256(content_hash + embedding_model + embedding_model_version)
-Stores pre-computed Voyage vectors to avoid expensive duplicate API calls.
+Stores pre-computed local BGE vectors to avoid redundant CPU inference.
 """
 import hashlib
 import json

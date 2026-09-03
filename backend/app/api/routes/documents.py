@@ -8,7 +8,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, status
 
-from app.api.dependencies import PostgresDep, SupervisorDep, get_supervisor
+from app.api.dependencies import PostgresDep, SupervisorDep, TenantContextDep, get_supervisor
 from app.agents.supervisor.agent import IngestionSupervisor
 from app.config.logging import get_logger
 from app.infrastructure.postgres.client import PostgresClient
@@ -28,6 +28,7 @@ router = APIRouter(prefix="/api/v1/documents", tags=["documents"])
 async def upload_document(
     file: UploadFile,
     industry: str = Form(default="manufacturing"),
+    tenant_ctx: TenantContextDep = ...,  # type: ignore[assignment]
     supervisor: Annotated[IngestionSupervisor, Depends(get_supervisor)] = ...,  # type: ignore[assignment]
 ) -> dict:
     """
@@ -54,7 +55,13 @@ async def upload_document(
         )
 
     try:
-        result = await supervisor.handle_upload(file=file, industry=industry)
+        result = await supervisor.handle_upload(
+            file=file,
+            industry=industry,
+            tenant_id=tenant_ctx.tenant_id,
+            assistant_id=tenant_ctx.assistant_id,
+            knowledge_base_id=tenant_ctx.knowledge_base_id,
+        )
         logger.info(
             "upload.accepted",
             document_id=result["document_id"],
@@ -78,6 +85,7 @@ async def upload_document(
 async def get_document_status(
     document_id: str,
     postgres: PostgresDep,
+    tenant_ctx: TenantContextDep,
 ) -> DocumentStatusResponse:
     """
     Poll the ingestion status of a document.
@@ -97,9 +105,11 @@ async def get_document_status(
         """
         SELECT id, status, progress_percent, created_at, completed_at, error_message
         FROM documents
-        WHERE id = $1
+        WHERE id = $1 AND tenant_id = $2 AND knowledge_base_id = $3
         """,
         doc_uuid,
+        tenant_ctx.tenant_id,
+        tenant_ctx.knowledge_base_id,
     )
 
     if row is None:
@@ -124,6 +134,7 @@ async def get_document_status(
 )
 async def list_documents(
     postgres: PostgresDep,
+    tenant_ctx: TenantContextDep,
     status_filter: str | None = None,
     limit: int = 20,
     offset: int = 0,
@@ -143,11 +154,13 @@ async def list_documents(
             SELECT id, file_name, industry, status, progress_percent,
                    page_count, created_at, completed_at
             FROM documents
-            WHERE status = $1
+            WHERE status = $1 AND tenant_id = $2 AND knowledge_base_id = $3
             ORDER BY created_at DESC
-            LIMIT $2 OFFSET $3
+            LIMIT $4 OFFSET $5
             """,
             status_filter.upper(),
+            tenant_ctx.tenant_id,
+            tenant_ctx.knowledge_base_id,
             limit,
             offset,
         )
@@ -157,9 +170,12 @@ async def list_documents(
             SELECT id, file_name, industry, status, progress_percent,
                    page_count, created_at, completed_at
             FROM documents
+            WHERE tenant_id = $1 AND knowledge_base_id = $2
             ORDER BY created_at DESC
-            LIMIT $1 OFFSET $2
+            LIMIT $3 OFFSET $4
             """,
+            tenant_ctx.tenant_id,
+            tenant_ctx.knowledge_base_id,
             limit,
             offset,
         )

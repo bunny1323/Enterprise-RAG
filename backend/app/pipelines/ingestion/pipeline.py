@@ -73,6 +73,22 @@ class IngestionPipeline:
             industry=state.industry,
         )
 
+        # ── Inject embedding model metadata from the active provider ───────────
+        embedder = self._services.get("embedder")
+        if embedder is not None and not state.embedding_model:
+            from app.services.embeddings.local_provider import LocalEmbeddingProvider  # noqa: PLC0415
+            from app.services.embeddings.service import EmbeddingService  # noqa: PLC0415
+            if isinstance(embedder, LocalEmbeddingProvider):
+                state = state.model_copy(update={
+                    "embedding_model": embedder._model_name,
+                    "embedding_model_version": LocalEmbeddingProvider.MODEL_VERSION,
+                })
+            elif isinstance(embedder, EmbeddingService):
+                state = state.model_copy(update={
+                    "embedding_model": embedder._model,
+                    "embedding_model_version": "3.5",
+                })
+
         for step_name, step_fn, progress_after, job_status in _PIPELINE_STEPS:
             # 1. Check for cancellation
             if state.cancelled or await self._check_is_cancelled(postgres, job_id):

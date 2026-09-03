@@ -2,13 +2,20 @@
 Health check route.
 GET /health — verifies connectivity to all dependent services.
 """
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, status
+from fastapi.responses import JSONResponse
 
 from app.config.logging import get_logger
 
 logger = get_logger(__name__)
 
 router = APIRouter(tags=["health"])
+
+
+@router.get("/health/live", summary="Process liveness check")
+async def liveness_check() -> dict[str, str]:
+    """Return success whenever the FastAPI process is serving requests."""
+    return {"status": "alive"}
 
 
 @router.get(
@@ -89,3 +96,56 @@ async def health_check(request: Request) -> dict:
         "status": "healthy" if overall_healthy else "degraded",
         "services": services,
     }
+
+
+@router.get("/health/ready", summary="Dependency readiness check")
+async def readiness_check(request: Request) -> JSONResponse:
+    """Return 503 when a required runtime dependency cannot be used."""
+    payload = await health_check(request)
+    code = status.HTTP_200_OK if payload["status"] == "healthy" else status.HTTP_503_SERVICE_UNAVAILABLE
+    return JSONResponse(status_code=code, content=payload)
+
+
+@router.get("/health/embedding", summary="Embedding health check")
+async def test_embedding(request: Request) -> dict:
+    """Test generating a small vector from the configured embedding provider."""
+    try:
+        from app.services.embeddings.service import EmbeddingService
+        embedder = request.app.state.embedder
+        return embedder.health_check()
+    except Exception as err:
+        logger.error("health.embedding_test_failed", error=str(err))
+        return {"status": "error", "error": str(err)}
+
+
+@router.get("/health/llm", summary="LLM Generation Test (GET)")
+@router.post("/health/llm", summary="LLM Generation Test (POST)")
+@router.get("/api/v1/health/llm", summary="LLM Generation Test (GET v1)")
+@router.post("/api/v1/health/llm", summary="LLM Generation Test (POST v1)")
+async def test_llm(request: Request) -> dict:
+    """Test generating a simple response from the configured LLM."""
+    try:
+        from app.services.generation.llm import LLMProvider
+        llm_provider: LLMProvider = request.app.state.llm_provider
+        
+        # If the provider has a health_check() method, invoke it for detailed diagnostics
+        if hasattr(llm_provider, "health_check"):
+            result = await llm_provider.health_check()
+            return result
+
+        response = await llm_provider.generate(
+            prompt="__HEALTH_CHECK__: Reply with 'LLM is working'",
+            evidence=[],
+            system_instruction="You are a health check. Reply with exactly: LLM is working",
+        )
+        return {
+            "status": "healthy",
+            "provider": request.app.state.settings.llm_provider,
+            "model": request.app.state.settings.llm_model,
+            "response": response.answer,
+        }
+    except Exception as err:
+        logger.error("health.llm_test_failed", error=str(err))
+        return {"status": "error", "error": str(err)}
+
+

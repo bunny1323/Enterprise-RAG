@@ -59,3 +59,32 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             logger.error("rate_limit.redis_error", error=str(e))
             
         return await call_next(request)
+
+
+class AuditLogMiddleware(BaseHTTPMiddleware):
+    """
+    Immutable audit logging for query and admin endpoints.
+    Logs tenant_id, user_id, path, method, status, and duration.
+    """
+    async def dispatch(self, request: Request, call_next):
+        start_time = time.time()
+        tenant_id = request.headers.get("X-Tenant-ID", "unknown")
+        user_id = request.headers.get("X-User-ID", "unknown")
+        
+        response = await call_next(request)
+        
+        duration_ms = int((time.time() - start_time) * 1000)
+        
+        # Only log API paths
+        if request.url.path.startswith("/api/v1/"):
+            logger.info(
+                "audit_log.request",
+                tenant_id=tenant_id,
+                user_id=user_id,
+                method=request.method,
+                path=request.url.path,
+                status_code=response.status_code,
+                duration_ms=duration_ms,
+            )
+            
+        return response

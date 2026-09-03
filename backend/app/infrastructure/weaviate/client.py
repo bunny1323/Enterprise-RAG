@@ -65,7 +65,7 @@ class WeaviateClient:
 
         client.collections.create(
             name=_COLLECTION_NAME,
-            description="Hierarchical document chunks with Voyage multimodal embeddings",
+            description="Hierarchical document chunks with BAAI/bge-small-en-v1.5 embeddings",
             vectorizer_config=wvc.config.Configure.Vectorizer.none(),  # BYO vectors
             properties=[
                 wvc.config.Property(
@@ -145,6 +145,44 @@ class WeaviateClient:
         )
         logger.info("weaviate.collection_created", name=_COLLECTION_NAME)
 
+    def get_collection_dimension(self) -> int | None:
+        """Fetch one object with its vector to determine the actual vector dimension."""
+        client = self._require_client()
+        if not client.collections.exists(_COLLECTION_NAME):
+            return None
+        
+        collection = client.collections.get(_COLLECTION_NAME)
+        # Fetch 1 object with its vector
+        response = collection.query.fetch_objects(limit=1, include_vector=True)
+        if response.objects and response.objects[0].vector:
+            # Handle potential multiple vector keys depending on Weaviate setup, but usually it's default
+            vec = response.objects[0].vector
+            if isinstance(vec, dict):
+                # Weaviate v4 returns a dict of named vectors if named vectors are used, or 'default'
+                for v in vec.values():
+                    return len(v)
+            elif isinstance(vec, list):
+                return len(vec)
+        return None
+
+    def get_object_count(self) -> int:
+        """Return total object count in the collection."""
+        client = self._require_client()
+        if not client.collections.exists(_COLLECTION_NAME):
+            return 0
+        
+        collection = client.collections.get(_COLLECTION_NAME)
+        agg = collection.aggregate.over_all(total_count=True)
+        return agg.total_count
+
+    def recreate_collection(self) -> None:
+        """DANGER: Drops and recreates the collection."""
+        client = self._require_client()
+        if client.collections.exists(_COLLECTION_NAME):
+            client.collections.delete(_COLLECTION_NAME)
+            logger.warning("weaviate.collection_deleted", name=_COLLECTION_NAME)
+        self.init_schema()
+
     # ── Write operations ───────────────────────────────────────────────────────
 
     def upsert_chunks(
@@ -152,7 +190,7 @@ class WeaviateClient:
         chunks: list[Chunk],
         vectors: list[list[float]],
     ) -> None:
-        """Batch-upsert chunks with pre-computed Voyage vectors."""
+        """Batch-upsert chunks with pre-computed BGE (BAAI/bge-small-en-v1.5) vectors."""
         if len(chunks) != len(vectors):
             raise ValueError(
                 f"Chunk/vector count mismatch: {len(chunks)} chunks vs {len(vectors)} vectors"

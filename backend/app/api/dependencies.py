@@ -3,7 +3,7 @@ FastAPI dependency injection functions.
 All singletons are cached on app.state to share across requests.
 """
 from functools import lru_cache
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Depends, Request
 
@@ -15,6 +15,7 @@ from app.infrastructure.weaviate.client import WeaviateClient
 from app.services.chunking.service import ChunkingService
 from app.services.document_parser.service import DocumentParserService
 from app.services.embeddings.service import EmbeddingService
+from app.services.embeddings.factory import build_embedding_provider
 from app.services.metadata.service import MetadataService
 from app.services.ocr.service import OCRService
 from app.services.storage.service import StorageService
@@ -141,11 +142,13 @@ def get_metadata_service() -> MetadataService:
 
 
 def get_embedding_service(settings: SettingsDep) -> EmbeddingService:
-    """Return a stateless EmbeddingService with Voyage API key."""
-    return EmbeddingService(
-        api_key=settings.voyage_api_key,
-        model=settings.voyage_model,
-    )
+    """Return the configured local embedding provider (BAAI/bge-small-en-v1.5)."""
+    return build_embedding_provider(settings)  # type: ignore[return-value]
+
+
+def get_checkpointer(request: Request) -> Any:
+    """Return the persistent checkpointer for LangGraph."""
+    return request.app.state.checkpointer
 
 
 # ── Annotated shorthand types for route injection ──────────────────────────────
@@ -153,5 +156,6 @@ def get_embedding_service(settings: SettingsDep) -> EmbeddingService:
 PostgresDep = Annotated[PostgresClient, Depends(get_postgres)]
 WeaviateDep = Annotated[WeaviateClient, Depends(get_weaviate)]
 Neo4jDep = Annotated[Neo4jClient, Depends(get_neo4j)]
+CheckpointerDep = Annotated[Any, Depends(get_checkpointer)]
 SupervisorDep = Annotated[object, Depends(get_supervisor)]
 
