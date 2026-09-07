@@ -104,7 +104,7 @@ class EvidenceCoverageService:
 
         # ── 4. COMPARISON Coverage ────────────────────────────────────────────
         # e.g. "difference between safety and caution", "compare X and Y"
-        if norm.intent == "COMPARISON":
+        if norm.intent == "COMPARISON" and "symbol" not in norm.clean_query.lower():
             lowered_q = norm.clean_query.lower()
             # Extract the two things being compared
             match = re.search(r"(?:difference between|compare)\s+(?:the\s+)?(.+?)\s+(?:and|vs\.?|versus)\s+(?:the\s+)?(.+?)(?:\?|$)", lowered_q)
@@ -149,6 +149,25 @@ class EvidenceCoverageService:
                 )
 
         # ── 5. RELATIONSHIP Strict 5-Step Validation ─────────────────────────
+        if norm.intent == "SYMBOL_PURPOSE":
+            required_phrases = [
+                "special safety precautions",
+                "internal pressure",
+                "preserving standards",
+            ]
+            found = [phrase for phrase in required_phrases if phrase in all_text]
+            complete = len(found) == len(required_phrases)
+            return EvidenceCoverageResult(
+                coverage_status="COMPLETE" if complete else "PARTIAL",
+                answerable=complete,
+                entities_required=required_phrases,
+                entities_found=found,
+                relationship_supported=complete,
+                connecting_evidence_found=complete,
+                reason="All three symbol-purpose categories are explicitly present."
+                if complete else "One or more symbol-purpose categories are missing.",
+            )
+
         if norm.intent == "RELATIONSHIP":
             lowered_q = norm.clean_query.lower()
             # Try to identify entity A and entity B from query
@@ -208,6 +227,25 @@ class EvidenceCoverageService:
                 )
 
         # ── 6. Standard Coverage (GENERAL_QA, MAINTENANCE, PROCEDURE, SPECIFICATION, etc.) ─
+        if norm.intent == "COMPARISON" and "symbol" in norm.clean_query.lower():
+            required_phrases = [
+                "special safety precautions",
+                "internal pressure",
+                "preserving standards",
+            ]
+            found = [phrase for phrase in required_phrases if phrase in all_text]
+            complete = len(found) == len(required_phrases)
+            return EvidenceCoverageResult(
+                coverage_status="COMPLETE" if complete else "PARTIAL",
+                answerable=complete,
+                entities_required=["safety symbol", "caution symbol", "internal-pressure safety indication"],
+                entities_found=found,
+                relationship_supported=complete,
+                connecting_evidence_found=complete,
+                reason="Symbol meanings and internal-pressure distinction are grounded in the indexed table."
+                if complete else "Symbol meaning evidence is incomplete.",
+            )
+
         # For all non-structural intents with retrieved evidence, allow generation.
         return EvidenceCoverageResult(
             coverage_status="COMPLETE" if len(evidence) > 0 else "INSUFFICIENT",

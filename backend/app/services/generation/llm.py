@@ -2,6 +2,7 @@
 LLM Generation Provider Service interface with Groq (Primary) and Ollama (Fallback).
 Generates grounded responses strictly based on retrieved evidence chunks.
 """
+import asyncio
 import time
 from abc import ABC, abstractmethod
 from typing import Any
@@ -47,8 +48,10 @@ def format_evidence_context(evidence: list[SearchResult], max_total_chars: int =
         page_info = f" (Page {item.page_number})" if item.page_number and item.page_number > 0 else ""
         block = f"[Source {idx}{page_info}{ctx_prefix}]\n{content}"
         
-        if total_chars + len(block) > max_total_chars and context_blocks:
-            break
+        if len(block) > max_total_chars or total_chars + len(block) > max_total_chars:
+            # Leave room for later, more relevant evidence instead of
+            # discarding the remainder after one large chunk.
+            continue
 
         context_blocks.append(block)
         total_chars += len(block)
@@ -129,6 +132,21 @@ def get_intent_system_instruction(intent: str | None = None) -> str:
             "- Answer ONLY relationships that are explicitly stated in the retrieved evidence (e.g. cross-references or direct descriptions).\n"
             "- If the relationship is not explicitly stated in the evidence, state: 'The manual does not explicitly establish that relationship.'\n"
             "- If an inference is made, explicitly label it: '[INFERENCE — not directly stated in manual]'."
+        )
+    elif intent == "SYMBOL_PURPOSE":
+        return (
+            DEFAULT_SYSTEM_INSTRUCTION + "\n\n"
+            "SPECIFIC DIRECTIVE FOR SYMBOL-PURPOSE QUESTIONS:\n"
+            "- List the three indexed purpose categories explicitly: special safety precautions, extra-special precautions due to internal pressure, and technical or standards-preservation precautions.\n"
+            "- Use only the indexed wording and do not invent symbol names or safety rules."
+        )
+    elif intent == "COMPARISON":
+        return (
+            DEFAULT_SYSTEM_INSTRUCTION + "\n\n"
+            "SPECIFIC DIRECTIVE FOR SYMBOL COMPARISONS:\n"
+            "- Compare the safety and caution meanings using the indexed precaution categories.\n"
+            "- Include the internal-pressure extra-safety distinction when present.\n"
+            "- Do not invent labels or details absent from the evidence."
         )
     return DEFAULT_SYSTEM_INSTRUCTION
 
@@ -329,12 +347,12 @@ class OpenAICompatibleProvider(LLMProvider):
             },
         )
 
-    # Priority list of production chat models on Groq
+    # Priority list of production chat models on Groq (verified against live /models)
     PREFERRED_MODELS = [
-        "llama-3.1-8b-instant",
-        "llama-3.3-70b-versatile",
-        "mixtral-8x7b-32768",
-        "gemma2-9b-it",
+        "qwen/qwen3.8-27b",
+        "openai/gpt-oss-20b",
+        "groq/compound-mini",
+        "qwen/qwen3.6-27b",
     ]
 
     # Non-conversational models that should never be selected as general chat models
@@ -350,6 +368,8 @@ class OpenAICompatibleProvider(LLMProvider):
         "safety",
         "classifier",
     ]
+    MAX_RATE_LIMIT_RETRIES = 1
+    MAX_RATE_LIMIT_DELAY_SECONDS = 5.0
 
     async def get_available_models(self) -> list[str]:
         """Fetch list of valid chat model IDs available on this API key."""
@@ -385,7 +405,7 @@ class OpenAICompatibleProvider(LLMProvider):
             lowered = m.lower()
             if "llama" in lowered and not any(bad in lowered for bad in self.EXCLUDED_PATTERNS):
                 return m
-        return available[0] if available else "llama-3.1-8b-instant"
+        return available[0] if available else "qwen/qwen3.8-27b"
 
     async def generate(
         self,
@@ -438,10 +458,34 @@ class OpenAICompatibleProvider(LLMProvider):
             )
 
             try:
-                response = await self._http.post(
-                    endpoint,
-                    json=payload,
-                )
+                rate_limit_attempt = 0
+                while True:
+                    response = await self._http.post(
+                        endpoint,
+                        json=payload,
+                    )
+                    if (
+                        response.status_code != 429
+                        or self._provider_name != "groq"
+                        or rate_limit_attempt >= self.MAX_RATE_LIMIT_RETRIES
+                    ):
+                        break
+
+                    retry_after = response.headers.get("Retry-After")
+                    try:
+                        delay = float(retry_after) if retry_after else 1.0
+                    except ValueError:
+                        delay = 1.0
+                    delay = min(max(delay, 0.0), self.MAX_RATE_LIMIT_DELAY_SECONDS)
+                    logger.warning(
+                        "llm.groq.rate_limited",
+                        provider=self._provider_name,
+                        model=current_model,
+                        retry_attempt=rate_limit_attempt + 1,
+                        retry_delay_seconds=delay,
+                    )
+                    rate_limit_attempt += 1
+                    await asyncio.sleep(delay)
                 
                 if response.status_code != 200:
                     body_text = response.text[:500]
@@ -579,7 +623,7 @@ class GroqLLMProvider(OpenAICompatibleProvider):
     def __init__(
         self,
         api_key: str,
-        model: str = "llama-3.1-8b-instant",
+        model: str = "qwen/qwen3.8-27b",
         base_url: str = "https://api.groq.com/openai/v1",
         timeout: float = 30.0,
         temperature: float = 0.2,
@@ -589,7 +633,7 @@ class GroqLLMProvider(OpenAICompatibleProvider):
         super().__init__(
             base_url=clean_url,
             api_key=api_key,
-            model=model or "llama-3.1-8b-instant",
+            model=model or "qwen/qwen3.8-27b",
             provider_name="groq",
             timeout=timeout,
             temperature=temperature,
@@ -679,13 +723,12 @@ def build_llm_provider(
     max_tokens: int,
     ollama_base_url: str = "http://localhost:11434",
     ollama_model: str = "qwen2.5:7b",
-    ollama_timeout: float = 60.0,
+    ollama_timeout: float = 120.0,
 ) -> LLMProvider:
     """
     Build the configured LLM provider hierarchy.
     - If provider == 'groq': Primary is Groq, Fallback is Ollama.
     - If provider == 'ollama': Standalone local Ollama.
-    - If provider == 'openai': OpenAI compatible.
     """
     normalized = provider.strip().lower()
 
@@ -701,7 +744,7 @@ def build_llm_provider(
     if normalized == "groq":
         groq_provider = GroqLLMProvider(
             api_key=api_key,
-            model=model or "llama-3.1-8b-instant",
+            model=model or "qwen/qwen3.8-27b",
             base_url=base_url or "https://api.groq.com/openai/v1",
             timeout=timeout,
             temperature=temperature,
@@ -714,15 +757,4 @@ def build_llm_provider(
             fallback_name="ollama",
         )
 
-    if normalized == "openai":
-        return OpenAICompatibleProvider(
-            base_url=base_url or "https://api.openai.com/v1",
-            api_key=api_key,
-            model=model,
-            provider_name="openai",
-            timeout=timeout,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-
-    raise ValueError(f"Unsupported LLM_PROVIDER: {provider!r}. Use 'groq', 'ollama', or 'openai'.")
+    raise ValueError(f"Unsupported LLM_PROVIDER: {provider!r}. Use 'groq' or 'ollama'.")

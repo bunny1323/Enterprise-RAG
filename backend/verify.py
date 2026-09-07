@@ -326,12 +326,73 @@ async def verify_pipeline() -> None:
     except Exception as e:
         print(f"    {WARN} Vector dimension check failed: {e}")
 
-    # ── 12-15. RAG End-to-End ─────────────────────────────────────────────────
-    print("[12] Executing E2E RAG test queries …")
+    # ── 12. Verify Table Chunking and Token Fallback (Regression 1-7) ─────────
+    print("[12] Verifying Table Chunking and Metadata Limits (Regression 1-7) …")
+    try:
+        with _weaviate_client() as client:
+            collection = client.collections.get(_COLLECTION)
+            
+            # Check Table Extraction
+            resp_tables = collection.query.fetch_objects(
+                filters=wvc.query.Filter.by_property("chunk_type").equal("TABLE"),
+                limit=100,
+                return_properties=["content", "page_number", "section", "chunk_id"]
+            )
+            tables = resp_tables.objects
+            
+            if not tables:
+                print(f"    {WARN} No TABLE chunks found (Markdown table extraction failed or doc lacks tables).")
+            else:
+                print(f"    {PASS} Markdown table extraction verified ({len(tables)} chunks).")
+                
+                # Check metadata preservation
+                c = tables[0]
+                if not c.properties.get("page_number"):
+                    print(f"    {FAIL} Table chunk missing page_number")
+                    failures.append("table_missing_page")
+                elif not c.properties.get("section"):
+                    print(f"    {FAIL} Table chunk missing section")
+                    failures.append("table_missing_section")
+                elif "|" not in c.properties.get("content", ""):
+                    print(f"    {WARN} Table chunk doesn't look like Markdown (missing |)")
+                else:
+                    print(f"    {PASS} Table rows and metadata preserved.")
+            
+            # Check Chunk Size limits (Fallback validation)
+            resp_texts = collection.query.fetch_objects(
+                filters=wvc.query.Filter.by_property("chunk_type").equal("TEXT"),
+                limit=100,
+                return_properties=["content", "chunk_id"]
+            )
+            oversized = 0
+            for obj in resp_texts.objects:
+                content = obj.properties.get("content", "")
+                words = len(content.split())
+                if words > 500:  # Absolute safety margin for chunk size
+                    oversized += 1
+            
+            if oversized > 0:
+                print(f"    {FAIL} Found {oversized} oversized text chunks (fallback failed).")
+                failures.append("oversized_chunks")
+            else:
+                print(f"    {PASS} Chunk size limits and token fallback logic respected.")
+                
+    except Exception as e:
+        print(f"    {FAIL} Chunk/Table verification failed: {e}")
+        failures.append("table_chunk_verification")
+
+    # ── 13-16. RAG End-to-End (Regression 8-12) ───────────────────────────────
+    print("[13] Executing E2E RAG test queries (Regression 8-12) …")
     test_queries = [
         ("What is the purpose of this service manual?", "GENERAL_QA"),
         ("What is the engine oil capacity?", "SPECIFICATION"),
         ("How do I replace the hydraulic filter?", "PROCEDURE"),
+        # Requested Regression Tests (8-12)
+        ("What is the conversion factor from kilograms to pounds?", "GENERAL_QA"),
+        ("What does section 3 cover?", "GENERAL_QA"),
+        ("What do sections 5 through 9 explain?", "GENERAL_QA"),
+        ("What does the page format 2-3 indicate?", "GENERAL_QA"),
+        ("How many sections are there in the manual structure?", "GENERAL_QA"),
     ]
 
     async with httpx.AsyncClient(timeout=120.0) as http:

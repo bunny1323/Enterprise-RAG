@@ -26,5 +26,8 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# Local application data
+# Local application data and documents
 backend/data/
+data/
+*.pdf
+*.log

@@ -17,9 +17,9 @@
     "figure_min_caption_length": 10
   },
   "embedding_config": {
-    "model": "voyage-multimodal-3.5",
-    "text_model": "voyage-3.5",
-    "dimensions": 1024,
+    "model": "BAAI/bge-small-en-v1.5",
+    "text_model": "BAAI/bge-small-en-v1.5",
+    "dimensions": 384,
     "text_modality": "text",
     "image_modality": "image"
   },

@@ -60,7 +60,15 @@ async def step(
     # DocumentParserService.parse() is async.
     # Therefore we MUST await it directly.
     #
-    parsed_doc = await parser.parse(state.storage_path)
+    import os
+    from app.services.document_parser.service import ParseProfile
+    
+    file_name = os.path.basename(state.storage_path).lower()
+    needs_high_accuracy = any(x in file_name for x in ["manual", "spec", "data", "table", "guide"])
+    profile = ParseProfile.HIGH_ACCURACY if needs_high_accuracy else ParseProfile.BALANCED
+    
+    logger.info("step.parse.profile_selected", document_id=str(state.document_id), profile=profile.value)
+    parsed_doc = await parser.parse(state.storage_path, profile=profile)
 
     # ---------------------------------------------------------
     # 3. Validate parser output
@@ -73,6 +81,14 @@ async def step(
 
     pages = parsed_doc.get("pages", [])
 
+    # Retry logic if BALANCED failed to find tables but it's a technical doc
+    if not needs_high_accuracy and profile == ParseProfile.BALANCED:
+        table_count = sum(len(p.get("tables", [])) for p in pages if isinstance(p, dict))
+        if table_count == 0:
+            logger.info("step.parse.retry_high_accuracy", document_id=str(state.document_id))
+            parsed_doc = await parser.parse(state.storage_path, profile=ParseProfile.HIGH_ACCURACY)
+            pages = parsed_doc.get("pages", [])
+
     if pages is None:
         pages = []
 
@@ -81,6 +97,26 @@ async def step(
             "Parsed document 'pages' must be a list, "
             f"got {type(pages).__name__}"
         )
+
+    # Validate tables to detect flattened numeric walls
+    degraded_tables = False
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        tables = page.get("tables", [])
+        for table in tables:
+            md = table.get("markdown", "")
+            if md and "|" not in md and len(md.split()) > 10:
+                logger.warning(
+                    "step.parse.degraded_table",
+                    document_id=str(state.document_id),
+                    page=page.get("page_num")
+                )
+                degraded_tables = True
+
+    if "metadata" not in parsed_doc:
+        parsed_doc["metadata"] = {}
+    parsed_doc["metadata"]["degraded_tables"] = degraded_tables
 
     # ---------------------------------------------------------
     # 4. Calculate document statistics
@@ -112,6 +148,7 @@ async def step(
         pages=page_count,
         tables=table_count,
         figures=figure_count,
+        degraded_tables=degraded_tables,
     )
 
     # ---------------------------------------------------------

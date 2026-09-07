@@ -17,6 +17,7 @@ from app.services.generation.llm import (
     FallbackLLMProvider,
     GroqLLMProvider,
     OllamaProvider,
+    format_evidence_context,
 )
 
 
@@ -39,7 +40,7 @@ async def test_groq_success(dummy_evidence):
     mock_primary = AsyncMock()
     mock_primary.generate.return_value = GenerationResult(
         answer="Section 3 covers the Hydraulic System.",
-        model_name="llama-3.1-8b-instant",
+        model_name="qwen/qwen3.8-27b",
         prompt_tokens=50,
         completion_tokens=20,
     )
@@ -58,7 +59,7 @@ async def test_groq_success(dummy_evidence):
     )
 
     assert "Hydraulic System" in result.answer
-    assert result.model_name == "llama-3.1-8b-instant"
+    assert result.model_name == "qwen/qwen3.8-27b"
     mock_primary.generate.assert_called_once()
     mock_fallback.generate.assert_not_called()
 
@@ -120,3 +121,46 @@ async def test_both_providers_fail_raises_clear_error(dummy_evidence):
     err_msg = str(exc_info.value)
     assert "Primary provider 'groq' failed" in err_msg
     assert "Fallback provider 'ollama' also failed" in err_msg
+
+
+@pytest.mark.asyncio
+async def test_groq_rate_limit_retries_once_then_succeeds(dummy_evidence):
+    provider = GroqLLMProvider(api_key="test-key", max_tokens=128)
+    first = httpx.Response(429, headers={"Retry-After": "0"})
+    second = httpx.Response(
+        200,
+        json={
+            "choices": [{"message": {"content": "The documented answer."}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 4},
+        },
+    )
+    provider._http.post = AsyncMock(side_effect=[first, second])
+
+    result = await provider.generate("What is documented?", dummy_evidence)
+
+    assert result.answer == "The documented answer."
+    assert provider._http.post.await_count == 2
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_groq_rate_limit_is_bounded_and_raises(dummy_evidence):
+    provider = GroqLLMProvider(api_key="test-key", max_tokens=128)
+    provider._http.post = AsyncMock(return_value=httpx.Response(429))
+
+    with pytest.raises(LLMProviderError):
+        await provider.generate("What is documented?", dummy_evidence)
+
+    assert provider._http.post.await_count == 2
+    await provider.close()
+
+
+def test_evidence_context_skips_large_early_chunks():
+    evidence = [
+        SearchResult(chunk_id="large", content="x " * 1900, score=1.0),
+        SearchResult(chunk_id="relevant", content="1 kg = 2.2046 lb", score=0.9),
+    ]
+
+    context = format_evidence_context(evidence, max_total_chars=100)
+
+    assert "1 kg = 2.2046 lb" in context

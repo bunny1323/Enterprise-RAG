@@ -2,7 +2,6 @@
 Embedding Provider Factory.
 
 Returns the configured local embedding provider (BAAI/bge-small-en-v1.5).
-Voyage AI has been removed.
 """
 from __future__ import annotations
 

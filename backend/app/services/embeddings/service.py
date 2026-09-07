@@ -1,8 +1,7 @@
 """
 Embedding Service — Local BGE provider adapter.
 
-This module now acts as a clean adapter around LocalEmbeddingProvider.
-All Voyage AI code has been removed.
+This module acts as a clean adapter around LocalEmbeddingProvider.
 
 The public interface is:
     embed_batch(texts)   → list[list[float]]
@@ -24,6 +23,5 @@ class EmbeddingQuotaError(Exception):
         super().__init__(message)
 
 
-# Remove the old Voyage-specific name so imports fail loudly if anything
-# still tries to reference it by the old symbol.
+# Preserve the old exception alias for callers while keeping failures local.
 RateLimitQuotaError = EmbeddingQuotaError

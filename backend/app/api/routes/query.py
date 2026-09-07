@@ -3,7 +3,7 @@ Query and Chat API Routes.
 POST /api/v1/chat   — Grounded RAG conversational endpoint
 POST /api/v1/search — Raw search endpoint (Retrieval only)
 POST /api/v1/rag/debug — RAG pipeline debug endpoint
-"""
+"""                                                                                              
 
 import time
 import uuid
@@ -342,3 +342,95 @@ async def rag_debug(
         "reranking_latency_ms": 0,
         "total_latency_ms": latency_ms,
     }
+
+
+@router.get(
+    "/trace",
+    summary="Deep trace of retrieval stages",
+)
+async def trace_retrieval(
+    request: Request,
+    q: str,
+    tenant_ctx: TenantContextDep,
+    postgres: PostgresDep,
+) -> dict:
+    try:
+        start_time = time.time()
+        
+        redis_client: RedisClient | None = getattr(request.app.state, "redis", None)
+        cache_svc = CacheService(redis_client, postgres) if redis_client else None
+        retrieval_agent = _build_retrieval_agent(request, postgres, cache_svc)
+        
+        # 1. Normalization
+        norm = retrieval_agent._normalizer.normalize(q)
+        
+        # 2. Embedding
+        query_vec = None
+        if cache_svc:
+            query_vec = await cache_svc.get_query_embedding(tenant_ctx, norm.clean_query)
+        if not query_vec:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            query_vectors = await loop.run_in_executor(None, retrieval_agent._embedder.embed_batch, [norm.clean_query])
+            query_vec = query_vectors[0] if query_vectors else []
+            
+        # 3. Dense & BM25
+        dense_res = await retrieval_agent._dense_svc.search(
+            query_vector=query_vec, top_k=10, tenant_id=tenant_ctx.tenant_id, knowledge_base_id=tenant_ctx.knowledge_base_id
+        )
+        bm25_res = await retrieval_agent._bm25_svc.search(
+            query_text=norm.clean_query, top_k=10, tenant_id=tenant_ctx.tenant_id, knowledge_base_id=tenant_ctx.knowledge_base_id
+        )
+        
+        # Morph & Typo
+        _retrieval_q = norm.retrieval_query or norm.clean_query
+        _has_morph = _retrieval_q.lower() != norm.clean_query.lower()
+        bm25_morph_res = await retrieval_agent._bm25_svc.search(query_text=_retrieval_q, top_k=10, tenant_id=tenant_ctx.tenant_id, knowledge_base_id=tenant_ctx.knowledge_base_id) if _has_morph else []
+        
+        _typo_q = norm.typo_query or norm.clean_query
+        _has_typo = _typo_q.lower() != norm.clean_query.lower() and _typo_q.lower() != _retrieval_q.lower()
+        bm25_typo_res = await retrieval_agent._bm25_svc.search(query_text=_typo_q, top_k=10, tenant_id=tenant_ctx.tenant_id, knowledge_base_id=tenant_ctx.knowledge_base_id) if _has_typo else []
+        
+        channel_results = [r for r in [dense_res, bm25_res, bm25_morph_res, bm25_typo_res] if r]
+        from app.utils.fusion import reciprocal_rank_fusion
+        fused_res = reciprocal_rank_fusion(channel_results, k=60)
+        
+        reranked_res = await retrieval_agent._reranker.rerank(
+            query=norm.clean_query,
+            candidates=fused_res,
+            top_n=10
+        )
+        
+        # Direct search for words
+        client = request.app.state.weaviate
+        collection = client._require_client().collections.get("DocumentChunk")
+        raw_search = collection.query.bm25(
+            query="kilogram kilograms pound pounds",
+            limit=5,
+            return_properties=["chunk_id", "document_id", "content", "section", "page_number", "file_name"]
+        )
+        raw_objects = []
+        for o in raw_search.objects:
+            raw_objects.append({
+                "chunk_id": o.properties.get("chunk_id"),
+                "content": o.properties.get("content", "")[:300]
+            })
+            
+        return {
+            "norm": {
+                "original": norm.raw_query,
+                "clean": norm.clean_query,
+                "retrieval": norm.retrieval_query,
+                "typo": norm.typo_query
+            },
+            "dense": [r.model_dump() for r in dense_res],
+            "bm25": [r.model_dump() for r in bm25_res],
+            "bm25_morph": [r.model_dump() for r in bm25_morph_res],
+            "bm25_typo": [r.model_dump() for r in bm25_typo_res],
+            "rrf": [r.model_dump() for r in fused_res],
+            "reranked": [r.model_dump() for r in reranked_res],
+            "direct_search": raw_objects
+        }
+    except Exception as e:
+        import traceback
+        return {"error": str(e), "traceback": traceback.format_exc()}

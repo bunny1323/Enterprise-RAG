@@ -49,7 +49,7 @@ Perfect for organizations that need explainable, auditable AI responses.
 ### Requirements
 - Python 3.11+
 - Docker (optional)
-- API keys: LLM provider (OpenAI, Groq, etc.) and embeddings (Voyage AI, etc.)
+- Groq API key and local Ollama installation for fallback generation
 
 ### Setup
 
@@ -57,12 +57,13 @@ Perfect for organizations that need explainable, auditable AI responses.
 ```bash
 git clone https://github.com/bunny1323/Enterprise-RAG.git
 cd Enterprise-RAG
+cd backend
 ```
 
 2. Create virtual environment
 ```bash
 python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+source .venv/bin/activate  # On Windows PowerShell: .\.venv\Scripts\Activate.ps1
 ```
 
 3. Install dependencies
@@ -77,26 +78,26 @@ cp .env.example .env
 
 Edit `.env` with your API keys and service URLs:
 ```
-LLM_PROVIDER=openai
-LLM_MODEL=gpt-4
-OPENAI_API_KEY=your_key_here
+LLM_PROVIDER=groq
+LLM_MODEL=qwen/qwen3.8-27b
+GROQ_API_KEY=your_groq_key
+# Ollama is the local fallback provider.
 
-EMBEDDING_MODEL=voyage-3
-VOYAGE_API_KEY=your_key_here
-
-WEAVIATE_URL=http://localhost:8080
+WEAVIATE_URL=https://your-cluster.weaviate.network
+WEAVIATE_API_KEY=your_key_here
 NEO4J_URI=bolt://localhost:7687
-POSTGRES_DSN=postgresql://user:pass@localhost/enterprise_rag
+NEO4J_PASSWORD=your_password
+DATABASE_URL=postgresql://user:pass@localhost/enterprise_rag
 ```
 
 5. Start services
 ```bash
-docker-compose up -d
+Start the configured PostgreSQL/Supabase, Weaviate, Neo4j, and optional Redis services. The backend does not create or replace them.
 ```
 
 6. Run the API
 ```bash
-uvicorn apps.api.main:app --reload
+python -m uvicorn app.main:app --reload
 ```
 
 Visit `http://localhost:8000/docs` for interactive API documentation.
@@ -135,14 +136,14 @@ This modular design allows components to be reused across different industries a
 ### Upload a Document
 
 ```bash
-curl -X POST http://localhost:8000/api/v1/documents/upload \
+curl -X POST http://localhost:8000/api/v1/documents \
   -F "file=@document.pdf"
 ```
 
 ### Query the System
 
 ```bash
-curl -X POST http://localhost:8000/api/v1/query \
+curl -X POST http://localhost:8000/api/v1/chat \
   -H "Content-Type: application/json" \
   -d '{
     "query": "What are the key findings?",
@@ -174,18 +175,20 @@ curl -X POST http://localhost:8000/api/v1/query \
 ### API Endpoints
 
 **Documents**
-- `POST /api/v1/documents/upload` - Upload document
+- `POST /api/v1/documents` - Upload document
 - `GET /api/v1/documents` - List documents
-- `GET /api/v1/documents/{id}` - Get document
-- `DELETE /api/v1/documents/{id}` - Delete document
+- `GET /api/v1/documents/{id}/status` - Get document ingestion status
+- `GET /api/v1/jobs/{job_id}` - Get ingestion job status
+- `POST /api/v1/jobs/{job_id}/cancel` - Cancel an active job
 
 **Queries**
-- `POST /api/v1/query` - Single query
-- `POST /api/v1/query/stream` - Streaming query with SSE
+- `POST /api/v1/search` - Retrieval-only query
+- `POST /api/v1/chat` - Grounded retrieval and generation
 
 **Health**
-- `GET /health` - Service health
-- `GET /health/ready` - Ready for requests
+- `GET /health/live` - Process liveness
+- `GET /health` - Dependency health report
+- `GET /health/ready` - Readiness (503 when required dependencies are unavailable)
 
 **Evaluation**
 - `POST /api/v1/evaluation` - Run evaluation tests

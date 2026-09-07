@@ -75,6 +75,12 @@ class ChunkingService:
             tables: list[dict] = page_data.get("tables", [])
             figures: list[dict] = page_data.get("figures", [])
 
+            # Some PDF extractors flatten visually tabular content into text
+            # items. Promote only titled numeric runs; ordinary prose remains
+            # on the existing structure-aware text path.
+            text_blocks, flattened_tables = self._promote_numeric_text_tables(text_blocks)
+            tables = [*tables, *flattened_tables]
+
             # ── Text chunking (parent → children) ─────────────────────────────
             new_sections, parent_chunks = self._make_parent_chunks_with_structure(
                 text_blocks=text_blocks,
@@ -112,7 +118,7 @@ class ChunkingService:
 
             # ── Table chunks ───────────────────────────────────────────────────
             for table in tables:
-                chunk = self._make_table_chunk(
+                table_chunks = self._make_table_chunks(
                     table=table,
                     page_num=page_num,
                     doc_str=doc_str,
@@ -124,8 +130,7 @@ class ChunkingService:
                     filename=filename,
                     section_ctx=section_ctx,
                 )
-                if self._validate_chunk(chunk):
-                    all_chunks.append(chunk)
+                all_chunks.extend([c for c in table_chunks if self._validate_chunk(c)])
 
             # ── Figure/image chunks ────────────────────────────────────────────
             for figure in figures:
@@ -155,6 +160,70 @@ class ChunkingService:
         # is only stored once — keep the first occurrence with lowest page_number)
         structure_entries = self._deduplicate_structure_entries(structure_entries)
         return all_chunks, structure_entries
+
+    def _promote_numeric_text_tables(
+        self,
+        text_blocks: list[dict],
+    ) -> tuple[list[dict], list[dict]]:
+        """Recover simple tables flattened into text items by a PDF parser."""
+        residual: list[dict] = []
+        promoted: list[dict] = []
+        index = 0
+
+        while index < len(text_blocks):
+            block = text_blocks[index]
+            text = block.get("text", "").strip()
+            next_text = (
+                text_blocks[index + 1].get("text", "").strip()
+                if index + 1 < len(text_blocks)
+                else ""
+            )
+            if not self._is_numeric_table_title(text) or not self._is_numeric_table_row(next_text):
+                residual.append(block)
+                index += 1
+                continue
+
+            title = text
+            rows = []
+            bboxes = [block.get("bbox", [])]
+            row_index = index + 1
+            while row_index < len(text_blocks):
+                row_block = text_blocks[row_index]
+                row_text = row_block.get("text", "").strip()
+                if not self._is_numeric_table_row(row_text):
+                    break
+                rows.append(row_text)
+                bboxes.append(row_block.get("bbox", []))
+                row_index += 1
+
+            promoted.append({
+                "title": title,
+                "rows": rows,
+                "bbox": self._merge_bboxes([b for b in bboxes if b]),
+            })
+            index = row_index
+
+        return residual, promoted
+
+    @staticmethod
+    def _is_numeric_table_row(text: str) -> bool:
+        tokens = text.split()
+        if len(tokens) < 4:
+            return False
+        numeric_tokens = sum(
+            bool(re.fullmatch(r"[-+]?\d+(?:\.\d+)?", token.strip("|,;")))
+            for token in tokens
+        )
+        return numeric_tokens >= 3 and numeric_tokens / len(tokens) >= 0.5
+
+    @staticmethod
+    def _is_numeric_table_title(text: str) -> bool:
+        if len(re.findall(r"[A-Za-z]+", text)) < 2:
+            return False
+        lowered = text.lower()
+        return "=" in text or bool(
+            re.search(r"\b(conversion|table|specification|reference|to)\b", lowered)
+        )
 
     # ── Structure-aware parent chunk creation (emits structure entries too) ──────
 
@@ -499,35 +568,71 @@ class ChunkingService:
         knowledge_base_id: str,
         filename: str,
     ) -> list[Chunk]:
-        # Token-aware splitting at sentence boundaries
-        sentences = re.split(r'(?<=[.!?])\s+', parent.content)
+        CHILD_TARGET = 256
         child_chunks: list[Chunk] = []
         child_idx = 0
+
+        # Attempt 1: Token-aware splitting at sentence boundaries
+        sentences = re.split(r'(?<=[.!?])\s+', parent.content)
+        
         current_sentences = []
         current_tokens = 0
-        CHILD_TARGET = 256
+        
+        def _flush_sentences():
+            nonlocal current_sentences, current_tokens, child_idx
+            if not current_sentences:
+                return
+            child = self._flush_child(
+                current_sentences, parent, document_id, industry, tenant_id, assistant_id, knowledge_base_id, filename, child_idx
+            )
+            child_chunks.append(child)
+            child_idx += 1
+            current_sentences = []
+            current_tokens = 0
 
         for sentence in sentences:
             if not sentence.strip():
                 continue
             s_tokens = _token_estimate(sentence)
             if current_tokens + s_tokens > CHILD_TARGET and current_sentences:
-                child = self._flush_child(
-                    current_sentences, parent, document_id, industry, tenant_id, assistant_id, knowledge_base_id, filename, child_idx
-                )
-                child_chunks.append(child)
-                child_idx += 1
-                current_sentences = []
-                current_tokens = 0
+                _flush_sentences()
             
             current_sentences.append(sentence)
             current_tokens += s_tokens
 
-        if current_sentences:
-            child = self._flush_child(
-                current_sentences, parent, document_id, industry, tenant_id, assistant_id, knowledge_base_id, filename, child_idx
-            )
-            child_chunks.append(child)
+        _flush_sentences()
+
+        # Fallback Check: Did the sentence splitter fail and produce an oversized chunk?
+        # e.g. for space-separated numeric walls without punctuation.
+        if len(child_chunks) == 1 and _token_estimate(child_chunks[0].content) > CHILD_TARGET * 1.5:
+            # Fallback to pure token-based splitting (word-based)
+            words = parent.content.split()
+            child_chunks.clear()
+            child_idx = 0
+            current_words = []
+            current_tokens = 0
+            
+            def _flush_words():
+                nonlocal current_words, current_tokens, child_idx
+                if not current_words:
+                    return
+                child = self._flush_child(
+                    [" ".join(current_words)], parent, document_id, industry, tenant_id, assistant_id, knowledge_base_id, filename, child_idx
+                )
+                child_chunks.append(child)
+                child_idx += 1
+                current_words = []
+                current_tokens = 0
+                
+            for word in words:
+                w_tokens = max(1, _token_estimate(word))
+                if current_tokens + w_tokens > CHILD_TARGET and current_words:
+                    _flush_words()
+                
+                current_words.append(word)
+                current_tokens += w_tokens
+                
+            _flush_words()
 
         return child_chunks
 
@@ -572,7 +677,7 @@ class ChunkingService:
 
     # ── Table chunks (Deterministic IDs) ───────────────────────────────────────
 
-    def _make_table_chunk(
+    def _make_table_chunks(
         self,
         table: dict,
         page_num: int,
@@ -584,38 +689,145 @@ class ChunkingService:
         knowledge_base_id: str,
         filename: str,
         section_ctx: dict | None = None,
-    ) -> Chunk:
+    ) -> list[Chunk]:
         markdown = table.get("markdown", "")
-        c_hash = compute_chunk_hash(markdown)
+        table_title = table.get("title", "").strip()
+        table_rows = [row.strip() for row in table.get("rows", []) if row.strip()]
+        if not markdown.strip() and not table_rows:
+            return []
+
+        source_content = "\n".join([table_title, *table_rows]) if table_rows else markdown
+        c_hash = compute_chunk_hash(source_content)
         table_hash_id = c_hash[:12]
-        chunk_id = f"{doc_str}::p{page_num}::t{table_hash_id}"
+        
         sec_ctx = section_ctx or {}
         sec_num = sec_ctx.get("number")
         sec_title = sec_ctx.get("title")
         sec_label = sec_ctx.get("label") or f"Page {page_num}"
         ctx_prefix = f"{filename} > {sec_label} > Page {page_num} > Table"
 
-        return Chunk(
-            chunk_id=chunk_id,
-            parent_id=None,
-            document_id=document_id,
-            tenant_id=tenant_id,
-            assistant_id=assistant_id,
-            knowledge_base_id=knowledge_base_id,
-            content=markdown,
-            content_hash=c_hash,
-            section=sec_label,
-            section_number=sec_num,
-            section_title=sec_title,
-            file_name=filename,
-            context_prefix=ctx_prefix,
-            embedding_representation="text",
-            page_number=page_num,
-            bounding_box=table.get("bbox"),
-            chunk_type=ChunkType.TABLE,
-            industry_domain=industry,
-            hierarchy_path=f"doc.section{sec_num or 0}.page{page_num}.table_{table_hash_id}",
-        )
+        if table_rows:
+            title_prefix = f"{table_title}\n" if table_title else ""
+            grouped_rows: list[list[str]] = []
+            current_rows: list[str] = []
+            current_tokens = _token_estimate(title_prefix)
+            for row in table_rows:
+                row_tokens = _token_estimate(row)
+                if current_rows and current_tokens + row_tokens > _TOKEN_MAX:
+                    grouped_rows.append(current_rows)
+                    current_rows = []
+                    current_tokens = _token_estimate(title_prefix)
+                current_rows.append(row)
+                current_tokens += row_tokens
+            if current_rows:
+                grouped_rows.append(current_rows)
+
+            chunks = []
+            for chunk_idx, rows in enumerate(grouped_rows):
+                content = title_prefix + "\n".join(rows)
+                chunks.append(Chunk(
+                    chunk_id=f"{doc_str}::p{page_num}::t{table_hash_id}::{chunk_idx}",
+                    parent_id=None,
+                    document_id=document_id,
+                    tenant_id=tenant_id,
+                    assistant_id=assistant_id,
+                    knowledge_base_id=knowledge_base_id,
+                    content=content,
+                    content_hash=compute_chunk_hash(content),
+                    section=sec_label,
+                    section_number=sec_num,
+                    section_title=sec_title,
+                    file_name=filename,
+                    context_prefix=ctx_prefix,
+                    embedding_representation="text",
+                    page_number=page_num,
+                    bounding_box=table.get("bbox"),
+                    chunk_type=ChunkType.TABLE,
+                    industry_domain=industry,
+                    hierarchy_path=f"doc.section{sec_num or 0}.page{page_num}.table_{table_hash_id}.{chunk_idx}",
+                    metadata={"table_title": table_title, "row_count": len(rows), "source": "flattened_text"},
+                ))
+            return chunks
+
+        lines = markdown.strip().split("\n")
+        
+        # Simple heuristic to find header and divider
+        header_lines = []
+        body_lines = []
+        in_body = False
+        
+        for line in lines:
+            if not in_body:
+                header_lines.append(line)
+                # markdown table divider contains multiple hyphens
+                if "|" in line and "---" in line.replace(" ", ""):
+                    in_body = True
+            else:
+                body_lines.append(line)
+                
+        # If no clear body is found, treat the whole thing as one chunk
+        if not in_body or not body_lines:
+            header_lines = lines
+            body_lines = []
+            
+        chunks = []
+        ROW_GROUP_SIZE = 10
+        
+        title_prefix = f"Table from {sec_label}:\n" if sec_title else ""
+        
+        if not body_lines:
+            content = title_prefix + "\n".join(header_lines)
+            chunks.append(Chunk(
+                chunk_id=f"{doc_str}::p{page_num}::t{table_hash_id}::0",
+                parent_id=None,
+                document_id=document_id,
+                tenant_id=tenant_id,
+                assistant_id=assistant_id,
+                knowledge_base_id=knowledge_base_id,
+                content=content,
+                content_hash=compute_chunk_hash(content),
+                section=sec_label,
+                section_number=sec_num,
+                section_title=sec_title,
+                file_name=filename,
+                context_prefix=ctx_prefix,
+                embedding_representation="text",
+                page_number=page_num,
+                bounding_box=table.get("bbox"),
+                chunk_type=ChunkType.TABLE,
+                industry_domain=industry,
+                hierarchy_path=f"doc.section{sec_num or 0}.page{page_num}.table_{table_hash_id}.0",
+            ))
+            return chunks
+
+        # Group rows
+        for i in range(0, len(body_lines), ROW_GROUP_SIZE):
+            group_rows = body_lines[i:i + ROW_GROUP_SIZE]
+            content = title_prefix + "\n".join(header_lines + group_rows)
+            chunk_idx = i // ROW_GROUP_SIZE
+            chunks.append(Chunk(
+                chunk_id=f"{doc_str}::p{page_num}::t{table_hash_id}::{chunk_idx}",
+                parent_id=None,
+                document_id=document_id,
+                tenant_id=tenant_id,
+                assistant_id=assistant_id,
+                knowledge_base_id=knowledge_base_id,
+                content=content,
+                content_hash=compute_chunk_hash(content),
+                section=sec_label,
+                section_number=sec_num,
+                section_title=sec_title,
+                file_name=filename,
+                context_prefix=ctx_prefix,
+                embedding_representation="text",
+                page_number=page_num,
+                bounding_box=table.get("bbox"),
+                chunk_type=ChunkType.TABLE,
+                industry_domain=industry,
+                hierarchy_path=f"doc.section{sec_num or 0}.page{page_num}.table_{table_hash_id}.{chunk_idx}",
+            ))
+
+        return chunks
 
     # ── Figure chunks (Deterministic IDs) ──────────────────────────────────────
 

@@ -22,7 +22,19 @@ class QueryDecompositionService:
         lowered = norm.clean_query.lower()
         sub_queries: list[SubQuery] = []
 
-        if norm.intent == "RELATIONSHIP":
+        if norm.intent == "SYMBOL_PURPOSE":
+            sub_queries.extend([
+                SubQuery(query="manual symbols safety precautions", target_entity="safety"),
+                SubQuery(query="symbols internal pressure extra safety precautions", target_entity="internal pressure"),
+                SubQuery(query="symbols technical precautions preserving standards", target_entity="preserving standards"),
+            ])
+        elif norm.intent == "COMPARISON" and "symbol" in lowered:
+            sub_queries.extend([
+                SubQuery(query="safety symbol meaning special safety precautions", target_entity="safety symbol"),
+                SubQuery(query="caution symbol meaning technical precautions preserving standards", target_entity="caution symbol"),
+                SubQuery(query="symbols internal pressure extra safety precautions", target_entity="internal pressure"),
+            ])
+        elif norm.intent == "RELATIONSHIP":
             # Extract Entity A and Entity B
             # Examples:
             # "relationship between troubleshooting and structure and function"

@@ -206,9 +206,54 @@ class RetrievalAgent:
                 ),
             }
 
+            # ── Morphological BM25 channel ────────────────────────────────────
+            # When the retrieval_query differs from the clean_query (e.g. the user
+            # typed 'kilograms' but the indexed text uses 'kilogram'), fire a second
+            # BM25 search with the morphologically normalized form so that BM25's
+            # exact inverted-index matching can find the relevant chunks.
+            _retrieval_q = norm.retrieval_query or norm.clean_query
+            _has_morph_variant = _retrieval_q.lower() != norm.clean_query.lower()
+            if _has_morph_variant:
+                tasks["bm25_morph"] = self._bm25_svc.search(
+                    query_text=_retrieval_q,
+                    top_k=query_state.top_k * 2,
+                    tenant_id=ctx.tenant_id,
+                    knowledge_base_id=ctx.knowledge_base_id,
+                    permitted_access_levels=permitted_access_levels,
+                )
+                logger.info(
+                    "retrieval_agent.morphological_bm25",
+                    original=norm.clean_query[:60],
+                    normalized=_retrieval_q[:60],
+                )
+
+            # ── Typo-corrected BM25 channel ───────────────────────────────────
+            # When the user's query contains spelling errors, the typo_query
+            # holds the corrected form. This is a SEPARATE channel from both
+            # the original BM25 and the morphological BM25 — it fires only when
+            # the typo-corrected form is distinct from the other two queries.
+            _typo_q = norm.typo_query or norm.clean_query
+            _has_typo_variant = (
+                _typo_q.lower() != norm.clean_query.lower()
+                and _typo_q.lower() != _retrieval_q.lower()
+            )
+            if _has_typo_variant:
+                tasks["bm25_typo"] = self._bm25_svc.search(
+                    query_text=_typo_q,
+                    top_k=query_state.top_k * 2,
+                    tenant_id=ctx.tenant_id,
+                    knowledge_base_id=ctx.knowledge_base_id,
+                    permitted_access_levels=permitted_access_levels,
+                )
+                logger.info(
+                    "retrieval_agent.typo_bm25",
+                    original=norm.clean_query[:60],
+                    corrected=_typo_q[:60],
+                )
+
             # ── Multi-hop / Relationship sub-query decomposition ───────────────
             extra_bm25: list[SearchResult] = []
-            if intent in ("MULTI_HOP", "RELATIONSHIP"):
+            if intent in ("SYMBOL_PURPOSE", "MULTI_HOP", "RELATIONSHIP", "COMPARISON"):
                 sub_queries = self._decomposer_svc.decompose(norm)
                 for sq in sub_queries:
                     if sq.query != norm.clean_query:
@@ -263,6 +308,20 @@ class RetrievalAgent:
                     dense_results = res
                 elif key == "bm25":
                     bm25_results = res
+                elif key == "bm25_morph":
+                    # Morphological BM25 variant — goes into extra_bm25 as a separate RRF channel
+                    extra_bm25.extend(res)
+                    logger.debug(
+                        "retrieval_agent.morphological_bm25_hits",
+                        hits=len(res),
+                    )
+                elif key == "bm25_typo":
+                    # Typo-corrected BM25 variant — goes into extra_bm25 as a separate RRF channel
+                    extra_bm25.extend(res)
+                    logger.debug(
+                        "retrieval_agent.typo_bm25_hits",
+                        hits=len(res),
+                    )
                 elif key == "graph":
                     graph_results = res
 
@@ -315,8 +374,12 @@ class RetrievalAgent:
                 # Boost chunks whose content contains the most query keywords
                 # This prevents large sections (like Section 9 MAINTENANCE) from
                 # dominating purely by volume of indexed content.
+                combined_text = f"{norm.clean_query} {norm.retrieval_query} {norm.typo_query}"
+                # Strip punctuation for reliable substring matching during keyword boost
+                import string
+                raw_keywords = {w.strip(string.punctuation) for w in combined_text.lower().split()}
                 query_keywords = [
-                    w for w in norm.clean_query.lower().split()
+                    w for w in raw_keywords
                     if len(w) > 3 and w not in {"what", "does", "this", "that", "from", "with",
                                                  "have", "when", "where", "which", "there", "their",
                                                  "between", "difference", "explain", "tell", "give"}
