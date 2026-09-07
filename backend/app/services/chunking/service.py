@@ -392,9 +392,33 @@ class ChunkingService:
             summary = vision_data.get("functional_summary", "")
             if summary:
                 parts.append(f"Description: {summary}")
+
             components = vision_data.get("components", [])
             if components:
                 parts.append(f"Components: {', '.join(str(c) for c in components)}")
+
+            relationships = vision_data.get("relationships", [])
+            if relationships:
+                relationship_texts = []
+                for rel in relationships:
+                    source = rel.get("from", "")
+                    target = rel.get("to", "")
+                    relation_type = rel.get("type", "")
+
+                    if source and target:
+                        relationship_texts.append(
+                            f"{source} -> {target} ({relation_type})"
+                        )
+
+                if relationship_texts:
+                    parts.append(
+                        f"Relationships: {'; '.join(relationship_texts)}"
+                    )
+
+            spatial_layout = vision_data.get("spatial_layout", "")
+            if spatial_layout:
+                parts.append(f"Spatial Layout: {spatial_layout}")
+
         if not parts:
             if not image_path:
                 return None

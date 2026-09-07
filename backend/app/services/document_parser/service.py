@@ -32,27 +32,29 @@ def _run_docling_in_process_queue(file_path: str, profile: str, result_queue: mp
     Communicates success/failure via the provided multiprocessing.Queue.
     """
     try:
-        from docling.document_converter import DocumentConverter
-        from docling.datamodel.pipeline_options import PipelineOptions, PdfPipelineOptions
-        
+        from docling.document_converter import DocumentConverter, PdfFormatOption
+        from docling.datamodel.base_models import InputFormat
+        from docling.datamodel.pipeline_options import PdfPipelineOptions
         # Configure Pipeline Options based on profile
         pipeline_options = PdfPipelineOptions()
         if profile == ParseProfile.FAST.value:
             pipeline_options.do_table_structure = False
             pipeline_options.do_ocr = False
-            pipeline_options.generate_page_images = False
+            pipeline_options.generate_picture_images = False
         elif profile == ParseProfile.BALANCED.value:
             pipeline_options.do_table_structure = True
             pipeline_options.do_ocr = False
-            pipeline_options.generate_page_images = False
+            pipeline_options.generate_picture_images = True
         else:  # HIGH_ACCURACY
             pipeline_options.do_table_structure = True
             pipeline_options.do_ocr = True
-            pipeline_options.generate_page_images = True
+            pipeline_options.generate_picture_images = True
 
         converter = DocumentConverter(
             format_options={
-                "pdf": pipeline_options
+                InputFormat.PDF: PdfFormatOption(
+                    pipeline_options=pipeline_options
+                )
             }
         )
         result = converter.convert(file_path)
@@ -88,17 +90,27 @@ def _run_docling_in_process_queue(file_path: str, profile: str, result_queue: mp
             except (AttributeError, IndexError, TypeError):
                 return []
 
-        def _save_figure(item: Any, source_path: str, page_num: int) -> str:
+        def _save_figure(
+            item: Any,
+            doc: Any,
+            source_path: str,
+            page_num: int,
+        ) -> str:
             try:
                 out_dir = Path(tempfile.gettempdir()) / "rag_figures" / Path(source_path).stem
                 out_dir.mkdir(parents=True, exist_ok=True)
+
                 out_path = out_dir / f"page{page_num}_{id(item)}.png"
-                image = item.get_image()
+
+                image = item.get_image(doc)
+
                 if image:
                     image.save(str(out_path))
                     return str(out_path)
+
             except Exception:
                 pass
+
             return ""
 
         for item, _ in doc.iterate_items():
@@ -132,7 +144,7 @@ def _run_docling_in_process_queue(file_path: str, profile: str, result_queue: mp
                     caption = item.caption_text(doc) or ""
                 except Exception:
                     pass
-                img_path = _save_figure(item, file_path, page_num)
+                img_path = _save_figure(item, doc, file_path, page_num)
                 _get_page(page_num)["figures"].append({
                     "image_path": img_path, "bbox": bbox, "page_num": page_num, "caption": caption
                 })
