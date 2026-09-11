@@ -49,12 +49,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         enable_console=settings.otel_console or settings.debug,
     )
 
-    logger.info("startup.begin", app=settings.app_name)
+    logger.info(
+        "startup.config_loaded",
+        app=settings.app_name,
+        port=settings.port,
+        debug=settings.debug,
+        llm_provider=settings.llm_provider,
+        llm_model=settings.llm_model,
+        embedding_provider=settings.embedding_provider,
+    )
 
     # ── 1. PostgreSQL pool ─────────────────────────────────────────────────────
     postgres = PostgresClient(database_url=settings.database_url)
-    await postgres.init_pool()
-    await postgres.init_schema()
+    try:
+        await postgres.init_pool(min_size=1, max_size=5)
+        await postgres.init_schema()
+        logger.info("startup.postgres_ready")
+    except Exception as err:
+        logger.error("startup.postgres_failed", error=str(err))
     app.state.postgres = postgres
 
     # ── 2. Weaviate Cloud ──────────────────────────────────────────────────────
@@ -65,6 +77,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         weaviate_client.connect()
         weaviate_client.init_schema()
+        logger.info("startup.weaviate_ready")
     except Exception as err:
         # The API can still provide liveness and report a truthful readiness
         # failure. Ingestion will record failed/partial vector indexing instead
@@ -81,6 +94,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         await neo4j_client.connect(retries=3, initial_delay=1.0)
         await neo4j_client.init_schema()
+        logger.info("startup.neo4j_ready")
     except Exception as err:
         # Keep the process available for diagnostics; graph indexing/search will
         # expose the dependency failure through their existing error paths.
@@ -90,6 +104,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # ── 4. Redis Client ────────────────────────────────────────────────────────
     redis_client = RedisClient(redis_url=settings.redis_url)
     await redis_client.connect()
+    if redis_client.is_connected():
+        logger.info("startup.redis_ready")
+    else:
+        if settings.redis_url:
+            logger.warning("startup.redis_unavailable")
+        else:
+            logger.info("startup.redis_disabled", reason="REDIS_URL not configured")
     app.state.redis = redis_client
 
     # ── 5. OPA Client ──────────────────────────────────────────────────────────
@@ -132,6 +153,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     app.state.embedder = embedding_service
     app.state.llm_provider = llm_provider
+    logger.info(
+        "startup.embedding_ready",
+        provider=settings.embedding_provider,
+        model=settings.local_embedding_model,
+        device=settings.local_embedding_device,
+    )
+    logger.info(
+        "startup.llm_ready",
+        provider=settings.llm_provider,
+        model=settings.llm_model,
+    )
 
     # ── 8. Pipeline and supervisor ─────────────────────────────────────────────
     services_registry: dict = {
@@ -162,25 +194,35 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("startup.queue_worker_started")
 
     # ── 10. Start checkpointer ────────────────────────────────────────────────
+    checkpointer_cm = None
     try:
         from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
         checkpointer_cm = AsyncPostgresSaver.from_conn_string(settings.database_url)
     except Exception as e:
-        logger.warning("startup.checkpointer_failed", error=str(e))
-        checkpointer_cm = None
+        logger.warning("startup.checkpointer_init_failed", error=str(e))
 
     if checkpointer_cm:
-        async with checkpointer_cm as checkpointer:
-            await checkpointer.setup()
-            app.state.checkpointer = checkpointer
-            logger.info("startup.checkpointer_ready")
-            
-            logger.info("startup.complete", app=settings.app_name, port=settings.port)
-            yield  # ── Application is running ────────────────────────────────────────
-    else:
+        try:
+            async with checkpointer_cm as checkpointer:
+                await checkpointer.setup()
+                app.state.checkpointer = checkpointer
+                logger.info("startup.checkpointer_ready")
+                logger.info("startup.complete", app=settings.app_name, port=settings.port)
+                yield  # ── Application is running ────────────────────────────────────
+                return
+        except Exception as e:
+            logger.warning("startup.checkpointer_postgres_failed", error=str(e))
+
+    # Fallback to MemorySaver so conversational memory works reliably
+    try:
+        from langgraph.checkpoint.memory import MemorySaver
+        app.state.checkpointer = MemorySaver()
+        logger.info("startup.checkpointer_memory_ready")
+    except Exception:
         app.state.checkpointer = None
-        logger.info("startup.complete", app=settings.app_name, port=settings.port)
-        yield  # ── Application is running ────────────────────────────────────────
+
+    logger.info("startup.complete", app=settings.app_name, port=settings.port)
+    yield  # ── Application is running ────────────────────────────────────────
 
     # ── Shutdown ───────────────────────────────────────────────────────────────
     logger.info("shutdown.begin")

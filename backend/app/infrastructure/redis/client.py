@@ -15,11 +15,25 @@ class RedisClient:
     """Async Redis client wrapper."""
 
     def __init__(self, redis_url: str) -> None:
-        self._url = redis_url
+        self._url = redis_url.strip() if redis_url else ""
         self._client: redis.Redis | None = None
+
+    def _masked_url(self) -> str:
+        """Return Redis URL with credentials safely masked."""
+        if not self._url:
+            return "<none>"
+        if "@" in self._url:
+            parts = self._url.split("@")
+            return f"redis://***@{parts[-1]}"
+        return self._url
 
     async def connect(self) -> None:
         """Connect to Redis server."""
+        if not self._url:
+            logger.info("redis.disabled", reason="REDIS_URL not configured")
+            self._client = None
+            return
+
         try:
             self._client = redis.from_url(
                 self._url,
@@ -28,9 +42,9 @@ class RedisClient:
                 socket_timeout=5.0,
             )
             await self._client.ping()
-            logger.info("redis.connected", url=self._url)
+            logger.info("redis.connected", url=self._masked_url())
         except Exception as err:
-            logger.warning("redis.connect_failed", error=str(err), url=self._url)
+            logger.warning("redis.connect_failed", error=str(err), url=self._masked_url())
             self._client = None
 
     async def close(self) -> None:

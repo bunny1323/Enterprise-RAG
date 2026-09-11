@@ -5,7 +5,7 @@ All configuration is centralized here — no hard-coded values elsewhere.
 
 from pathlib import Path
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -35,8 +35,8 @@ class Settings(BaseSettings):
     local_embedding_device: str = Field(default="cpu")
     local_embedding_batch_size: int = Field(default=8)
 
-    # Redis
-    redis_url: str = Field(default="redis://localhost:6379")
+    # Redis (Render Key Value in prod; localhost fallback only in local dev)
+    redis_url: str = Field(default="")
     cache_ttl_seconds: int = Field(default=3600)
 
     # Ingestion Controls
@@ -111,13 +111,29 @@ class Settings(BaseSettings):
                 return True
         return value
 
-    @field_validator("neo4j_uri", "neo4j_user", "neo4j_password", mode="before")
+    @field_validator(
+        "neo4j_uri",
+        "neo4j_user",
+        "neo4j_password",
+        "redis_url",
+        "llm_model",
+        "llm_base_url",
+        "weaviate_url",
+        mode="before",
+    )
     @classmethod
-    def strip_neo4j_credentials(cls, value: object) -> object:
-        """Strip whitespace and accidental enclosing quotes from Neo4j config."""
+    def strip_config_strings(cls, value: object) -> object:
+        """Strip whitespace and accidental enclosing quotes from string configs."""
         if isinstance(value, str):
             return value.strip().strip("'\"")
         return value
+
+    @model_validator(mode="after")
+    def resolve_redis_fallback(self) -> "Settings":
+        """Fall back to localhost Redis ONLY during local development (debug=True)."""
+        if not self.redis_url and self.debug:
+            self.redis_url = "redis://localhost:6379"
+        return self
 
     @property
     def database_url_async(self) -> str:

@@ -192,7 +192,7 @@ class OllamaProvider(LLMProvider):
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._timeout = timeout
-        self._http = httpx.AsyncClient(timeout=timeout)
+        self._http = httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=3.0))
 
     async def generate(
         self,
@@ -292,8 +292,11 @@ class OllamaProvider(LLMProvider):
                 "stream": False,
                 "options": {"num_predict": 5, "temperature": 0.0},
             }
-            resp = await self._http.post(f"{self._base_url}/api/generate", json=payload, timeout=self._timeout)
-            resp.raise_for_status()
+            resp = await self._http.post(
+                f"{self._base_url}/api/generate",
+                json=payload,
+                timeout=httpx.Timeout(5.0, connect=2.0),
+            )
             latency_ms = int((time.perf_counter() - start_time) * 1000)
             data = resp.json()
             return {
