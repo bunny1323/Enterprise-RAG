@@ -111,6 +111,14 @@ class Settings(BaseSettings):
                 return True
         return value
 
+    @field_validator("neo4j_uri", "neo4j_user", "neo4j_password", mode="before")
+    @classmethod
+    def strip_neo4j_credentials(cls, value: object) -> object:
+        """Strip whitespace and accidental enclosing quotes from Neo4j config."""
+        if isinstance(value, str):
+            return value.strip().strip("'\"")
+        return value
+
     @property
     def database_url_async(self) -> str:
         return self.database_url

@@ -79,7 +79,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         password=settings.neo4j_password,
     )
     try:
-        await neo4j_client.connect()
+        await neo4j_client.connect(retries=3, initial_delay=1.0)
         await neo4j_client.init_schema()
     except Exception as err:
         # Keep the process available for diagnostics; graph indexing/search will

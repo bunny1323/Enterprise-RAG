@@ -5,6 +5,8 @@ Document -> Section -> Chunk
 Document -> SUPERSEDES -> Document
 Chunk -> MENTIONS -> Entity
 """
+import asyncio
+import time
 from typing import Any
 
 from neo4j import AsyncDriver, AsyncGraphDatabase
@@ -23,32 +25,65 @@ class Neo4jClient:
         self._user = user
         self._password = password
         self._driver: AsyncDriver | None = None
+        self._schema_initialized: bool = False
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
-    async def connect(self) -> None:
-        """Open the async driver."""
-        self._driver = AsyncGraphDatabase.driver(
-            self._uri,
-            auth=(self._user, self._password),
-            max_connection_lifetime=600,
-            max_connection_pool_size=10,
-            liveness_check_timeout=60,
-            max_transaction_retry_time=30,
-        )
-        await self._driver.verify_connectivity()
-        logger.info("neo4j.connected", uri=self._uri)
+    async def connect(self, retries: int = 3, initial_delay: float = 1.0) -> None:
+        """Open the async driver and verify connectivity with bounded retry."""
+        if self._driver is None:
+            self._driver = AsyncGraphDatabase.driver(
+                self._uri,
+                auth=(self._user, self._password),
+                max_connection_lifetime=600,
+                max_connection_pool_size=10,
+                liveness_check_timeout=60,
+                max_transaction_retry_time=30,
+                keep_alive=True,
+                connection_timeout=15.0,
+            )
+
+        last_err: Exception | None = None
+        delay = initial_delay
+        for attempt in range(1, retries + 1):
+            try:
+                await self._driver.verify_connectivity()
+                logger.info("neo4j.connected", uri=self._uri, attempt=attempt)
+                return
+            except Exception as err:
+                last_err = err
+                logger.warning(
+                    "neo4j.connect_retry",
+                    attempt=attempt,
+                    max_retries=retries,
+                    error=str(err),
+                )
+                if attempt < retries:
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, 4.0)
+
+        if last_err:
+            raise last_err
 
     async def close(self) -> None:
         """Close the driver and release all connections."""
         if self._driver:
-            await self._driver.close()
+            try:
+                res = self._driver.close()
+                if asyncio.iscoroutine(res):
+                    await res
+            finally:
+                self._driver = None
+                self._schema_initialized = False
             logger.info("neo4j.closed")
 
     # ── Schema ─────────────────────────────────────────────────────────────────
 
     async def init_schema(self) -> None:
         """Create uniqueness constraints and indexes."""
+        if self._schema_initialized:
+            return
+
         driver = self._require_driver()
         async with driver.session() as session:
             await session.run(
@@ -63,6 +98,7 @@ class Neo4jClient:
                 "CREATE INDEX idx_chunk_tenant IF NOT EXISTS "
                 "FOR (c:Chunk) ON (c.tenant_id, c.knowledge_base_id)"
             )
+        self._schema_initialized = True
         logger.info("neo4j.schema_initialized")
 
     # ── Graph operations ───────────────────────────────────────────────────────
@@ -251,13 +287,33 @@ class Neo4jClient:
     async def verify_connectivity(self) -> bool:
         """Return True if driver can reach Neo4j server."""
         try:
+            if self._driver is None:
+                await self.connect(retries=1)
             driver = self._require_driver()
             await driver.verify_connectivity()
             return True
         except Exception:
             return False
 
+    async def health_check(self) -> dict[str, Any]:
+        """Perform a live health check query against Neo4j."""
+        start_time = time.perf_counter()
+        try:
+            if self._driver is None:
+                await self.connect(retries=2, initial_delay=0.5)
+            driver = self._require_driver()
+            async with driver.session() as session:
+                result = await session.run("RETURN 1 AS ping")
+                record = await result.single()
+                if record and record["ping"] == 1:
+                    latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
+                    return {"status": "ok", "latency_ms": latency_ms}
+            return {"status": "error", "error": "Query returned unexpected result"}
+        except Exception as err:
+            return {"status": "error", "error": str(err)}
+
     def _require_driver(self) -> AsyncDriver:
         if self._driver is None:
             raise RuntimeError("Neo4jClient.connect() must be called first")
         return self._driver
+

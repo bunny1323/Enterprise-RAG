@@ -18,6 +18,8 @@ async def liveness_check() -> dict[str, str]:
     return {"status": "alive"}
 
 
+
+
 @router.get(
     "/health",
     summary="System health check",
@@ -67,11 +69,11 @@ async def health_check(request: Request) -> dict:
     # ── Neo4j ──────────────────────────────────────────────────────────────────
     try:
         neo4j_client = request.app.state.neo4j
-        reachable = await neo4j_client.verify_connectivity()
-        if reachable:
+        hc = await neo4j_client.health_check()
+        if hc.get("status") == "ok":
             services["neo4j"] = "ok"
         else:
-            services["neo4j"] = "error: not reachable"
+            services["neo4j"] = f"error: {hc.get('error', 'not reachable')}"
             overall_healthy = False
     except Exception as err:
         services["neo4j"] = f"error: {str(err)}"
