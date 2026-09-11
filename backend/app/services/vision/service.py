@@ -17,18 +17,20 @@ logger = get_logger(__name__)
 
 _ANALYSIS_PROMPT = (
     "Analyze this technical diagram or engineering schematic carefully. "
+    "Identify only the most important information visible in the diagram. "
     "Return ONLY a valid JSON object with exactly these keys:\n"
     "{\n"
-    '  "functional_summary": "string describing what this diagram shows",\n'
-    '  "components": ["list", "of", "identified", "components"],\n'
+    '  "functional_summary": "concise summary, maximum 3 sentences",\n'
+    '  "components": ["maximum 20 important component names"],\n'
     '  "relationships": [\n'
     '    {"from": "component_a", "to": "component_b", "type": "RELATIONSHIP_TYPE"}\n'
     "  ],\n"
-    '  "spatial_layout": "string describing the spatial organization"\n'
+    '  "spatial_layout": "concise description of the spatial organization"\n'
     "}\n"
-    "Do not include any text outside the JSON object."
+    "Return at most 15 important relationships. "
+    "Do not repeat relationships. "
+    "Do not include markdown or any text outside the JSON object."
 )
-
 
 class VisionService:
     """
@@ -38,11 +40,11 @@ class VisionService:
     No external API calls — entirely free and offline.
     """
 
-    def __init__(self, ollama_base_url: str, model: str = "llava:13b") -> None:
+    def __init__(self, ollama_base_url: str, model: str = "qwen2.5vl:3b") -> None:
         self._base_url = ollama_base_url.rstrip("/")
         self._model = model
         # Reuse connection pool across requests
-        self._http = httpx.Client(timeout=120.0)
+        self._http = httpx.Client(timeout=600.0)
 
     @retry(
         stop=stop_after_attempt(3),
@@ -80,9 +82,10 @@ class VisionService:
             "prompt": _ANALYSIS_PROMPT,
             "images": [image_b64],
             "stream": False,
+            "format": "json",
             "options": {
                 "temperature": 0.1,  # Low temp for structured JSON output
-                "num_predict": 512,
+                "num_predict": 1024,
             },
         }
 

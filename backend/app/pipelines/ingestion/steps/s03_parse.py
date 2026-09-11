@@ -10,6 +10,7 @@ from app.agents.supervisor.state import IngestionState
 from app.config.logging import get_logger
 from app.models.document import DocumentStatus
 from app.services.document_parser.service import DocumentParserService
+from app.config.settings import get_settings
 
 logger = get_logger(__name__)
 

@@ -31,8 +31,10 @@ class Neo4jClient:
         self._driver = AsyncGraphDatabase.driver(
             self._uri,
             auth=(self._user, self._password),
-            max_connection_lifetime=3600,
+            max_connection_lifetime=600,
             max_connection_pool_size=10,
+            liveness_check_timeout=60,
+            max_transaction_retry_time=30,
         )
         await self._driver.verify_connectivity()
         logger.info("neo4j.connected", uri=self._uri)
@@ -72,19 +74,49 @@ class Neo4jClient:
     ) -> None:
         """
         Build the document hierarchy graph in Neo4j with tenant isolation.
+
         Graph shape:
-            (:Document {id, tenant_id})-[:HAS_SECTION]->(:Section {chunk_id})-[:CONTAINS_CHUNK]->(:Chunk {chunk_id, tenant_id})
+            (:Document)-[:HAS_SECTION]->(:Section)
+            (:Section)-[:CONTAINS_CHUNK]->(:Chunk)
         """
         driver = self._require_driver()
+
         if not chunks:
             return
 
         tenant_id = chunks[0].tenant_id
         kb_id = chunks[0].knowledge_base_id
 
-        async with driver.session() as session:
-            # Upsert root Document node
-            await session.run(
+        parent_chunks = [c for c in chunks if c.parent_id is None]
+        child_chunks = [c for c in chunks if c.parent_id is not None]
+
+        sections = [
+            {
+                "chunk_id": c.chunk_id,
+                "tenant_id": c.tenant_id,
+                "kb_id": c.knowledge_base_id,
+                "page_number": c.page_number,
+                "chunk_type": c.chunk_type.value,
+                "hierarchy_path": c.hierarchy_path,
+            }
+            for c in parent_chunks
+        ]
+
+        children = [
+            {
+                "parent_id": c.parent_id,
+                "chunk_id": c.chunk_id,
+                "tenant_id": c.tenant_id,
+                "kb_id": c.knowledge_base_id,
+                "page_number": c.page_number,
+                "chunk_type": c.chunk_type.value,
+                "hierarchy_path": c.hierarchy_path,
+            }
+            for c in child_chunks
+        ]
+
+        async def _write_tree(tx):
+            await tx.run(
                 """
                 MERGE (d:Document {id: $doc_id})
                 SET d.tenant_id = $tenant_id,
@@ -95,59 +127,46 @@ class Neo4jClient:
                 kb_id=kb_id,
             )
 
-            parent_chunks = [c for c in chunks if c.parent_id is None]
-            child_chunks = [c for c in chunks if c.parent_id is not None]
-
-            # Create Section nodes
-            for parent in parent_chunks:
-                props: dict[str, Any] = {
-                    "doc_id": document_id,
-                    "chunk_id": parent.chunk_id,
-                    "tenant_id": parent.tenant_id,
-                    "kb_id": parent.knowledge_base_id,
-                    "page_number": parent.page_number,
-                    "chunk_type": parent.chunk_type.value,
-                    "hierarchy_path": parent.hierarchy_path,
-                }
-                await session.run(
+            if sections:
+                await tx.run(
                     """
                     MATCH (d:Document {id: $doc_id})
-                    MERGE (s:Section {chunk_id: $chunk_id})
-                    SET s.tenant_id = $tenant_id,
-                        s.knowledge_base_id = $kb_id,
-                        s.page_number = $page_number,
-                        s.chunk_type  = $chunk_type,
-                        s.hierarchy_path = $hierarchy_path
+                    UNWIND $sections AS section
+
+                    MERGE (s:Section {chunk_id: section.chunk_id})
+                    SET s.tenant_id = section.tenant_id,
+                        s.knowledge_base_id = section.kb_id,
+                        s.page_number = section.page_number,
+                        s.chunk_type = section.chunk_type,
+                        s.hierarchy_path = section.hierarchy_path
+
                     MERGE (d)-[:HAS_SECTION]->(s)
                     """,
-                    **props,
+                    doc_id=document_id,
+                    sections=sections,
                 )
 
-            # Create Chunk nodes
-            for child in child_chunks:
-                child_props: dict[str, Any] = {
-                    "doc_id": document_id,
-                    "parent_id": child.parent_id,
-                    "chunk_id": child.chunk_id,
-                    "tenant_id": child.tenant_id,
-                    "kb_id": child.knowledge_base_id,
-                    "page_number": child.page_number,
-                    "chunk_type": child.chunk_type.value,
-                    "hierarchy_path": child.hierarchy_path,
-                }
-                await session.run(
+            if children:
+                await tx.run(
                     """
-                    MATCH (s:Section {chunk_id: $parent_id})
-                    MERGE (c:Chunk {chunk_id: $chunk_id})
-                    SET c.tenant_id         = $tenant_id,
-                        c.knowledge_base_id = $kb_id,
-                        c.page_number       = $page_number,
-                        c.chunk_type        = $chunk_type,
-                        c.hierarchy_path    = $hierarchy_path
+                    UNWIND $children AS child
+
+                    MATCH (s:Section {chunk_id: child.parent_id})
+
+                    MERGE (c:Chunk {chunk_id: child.chunk_id})
+                    SET c.tenant_id = child.tenant_id,
+                        c.knowledge_base_id = child.kb_id,
+                        c.page_number = child.page_number,
+                        c.chunk_type = child.chunk_type,
+                        c.hierarchy_path = child.hierarchy_path
+
                     MERGE (s)-[:CONTAINS_CHUNK]->(c)
                     """,
-                    **child_props,
+                    children=children,
                 )
+
+        async with driver.session() as session:
+            await session.execute_write(_write_tree)
 
         logger.info(
             "neo4j.document_tree_created",
