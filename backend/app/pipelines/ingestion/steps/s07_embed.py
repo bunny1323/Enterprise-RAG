@@ -92,7 +92,7 @@ async def step(state: IngestionState, services: dict[str, Any]) -> IngestionStat
         text_misses=len(text_miss_indices),
     )
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     new_cache_entries: dict[str, list[float]] = {}
 
     # 5. Embed all misses via embed_batch() in executor

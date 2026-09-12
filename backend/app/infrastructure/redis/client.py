@@ -24,7 +24,8 @@ class RedisClient:
             return "<none>"
         if "@" in self._url:
             parts = self._url.split("@")
-            return f"redis://***@{parts[-1]}"
+            scheme = self._url.split("://")[0] + "://" if "://" in self._url else "redis://"
+            return f"{scheme}***@{parts[-1]}"
         return self._url
 
     async def connect(self) -> None:

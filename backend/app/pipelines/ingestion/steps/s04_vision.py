@@ -34,7 +34,7 @@ async def step(state: IngestionState, services: dict[str, Any]) -> IngestionStat
         return state
 
     vision: VisionService = services["vision"]
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     pages = state.parsed_doc.get("pages", [])
     total_figures = 0

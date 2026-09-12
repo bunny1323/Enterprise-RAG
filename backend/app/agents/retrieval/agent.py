@@ -171,7 +171,7 @@ class RetrievalAgent:
 
             if not query_vec:
                 # LocalEmbeddingProvider is synchronous, so run embedding in executor.
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
 
                 query_vectors = await loop.run_in_executor(
                     None,

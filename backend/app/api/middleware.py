@@ -38,7 +38,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         try:
             # Note: A proper atomic INCR + EXPIRE is ideal, using standard redis operations
             # Assuming our RedisClient has basic get/set or we can use the raw aioredis client
-            raw_redis = getattr(redis_client, "_redis", None)
+            raw_redis = getattr(redis_client, "_client", None)
             if raw_redis:
                 pipeline = raw_redis.pipeline()
                 pipeline.incr(key)

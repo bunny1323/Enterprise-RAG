@@ -370,7 +370,7 @@ async def trace_retrieval(
             query_vec = await cache_svc.get_query_embedding(tenant_ctx, norm.clean_query)
         if not query_vec:
             import asyncio
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             query_vectors = await loop.run_in_executor(None, retrieval_agent._embedder.embed_batch, [norm.clean_query])
             query_vec = query_vectors[0] if query_vectors else []
             

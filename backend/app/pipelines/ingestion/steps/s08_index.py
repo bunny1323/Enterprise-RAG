@@ -80,7 +80,7 @@ async def step(state: IngestionState, services: dict[str, Any]) -> IngestionStat
     # ── 2. Weaviate vector upsert ──────────────────────────────────────────────
     try:
         logger.debug("step.index.weaviate_start", document_id=doc_id)
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(
             None,
             lambda: weaviate_client.upsert_chunks(state.chunks, state.vectors),

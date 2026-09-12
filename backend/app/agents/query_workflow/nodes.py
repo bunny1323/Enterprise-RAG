@@ -93,7 +93,7 @@ class QueryNodes:
                 # Need kb_version for the semantic cache lookup
                 kb_ver = await self._cache.get_kb_version(ctx.tenant_id, ctx.knowledge_base_id)
                 # embed_query is synchronous (local BGE), run in executor
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
                 query_vec = await loop.run_in_executor(None, self._embedder.embed_query, state["query"])
                 if query_vec:
                     sem_cached = await self._semantic_cache.get(
