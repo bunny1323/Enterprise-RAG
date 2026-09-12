@@ -65,9 +65,18 @@ class Settings(BaseSettings):
     neo4j_user: str = Field(default="neo4j")
     neo4j_password: str = Field(...)
 
+    # Vision Provider ("disabled" for cloud/Render; "ollama" for local ingestion)
+    vision_provider: str = Field(
+        default="disabled",
+        validation_alias=AliasChoices("VISION_PROVIDER", "VISION_SERVICE_PROVIDER"),
+    )
+
     # Ollama
     ollama_base_url: str = Field(default="http://localhost:11434")
-    ollama_vision_model: str = Field(default="llava:13b")
+    ollama_vision_model: str = Field(
+        default="qwen2.5vl:3b",
+        validation_alias=AliasChoices("OLLAMA_VISION_MODEL", "VISION_MODEL"),
+    )
     ollama_model: str = Field(default="qwen2.5:7b")
     ollama_timeout: float = Field(default=120.0, gt=0, validation_alias=AliasChoices("OLLAMA_TIMEOUT", "LLM_FALLBACK_TIMEOUT"))
 

@@ -21,10 +21,13 @@ from app.api.dependencies import (
     SettingsDep,
     TenantContextDep,
 )
+from pathlib import Path
+
 from app.config.logging import get_logger
 from app.infrastructure.redis.client import RedisClient
 from app.models.query import (
     EvidenceSnippet,
+    ImageEvidence,
     QueryRequest,
     QueryResponse,
 )
@@ -50,6 +53,37 @@ router = APIRouter(prefix="/api/v1", tags=["query"])
 
 
 from app.services.retrieval.structure_search import StructureSearchService
+
+
+def _image_path_to_url(image_path: str, processed_storage_path: str) -> str | None:
+    """
+    Safely convert an absolute image filesystem path to a web-accessible URL.
+    Ensures the path resides within processed_storage_path to prevent path traversal,
+    and checks that the file actually exists and has an allowed image extension.
+    """
+    if not image_path or not isinstance(image_path, str):
+        return None
+
+    try:
+        raw_path = Path(image_path).resolve()
+        base_dir = Path(processed_storage_path).resolve()
+
+        # Check allowed image extensions
+        if raw_path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+            return None
+
+        # Prevent directory traversal - path must be inside base_dir
+        if not raw_path.is_relative_to(base_dir):
+            return None
+
+        # Ensure file exists on disk
+        if not raw_path.is_file():
+            return None
+
+        rel_path = raw_path.relative_to(base_dir).as_posix()
+        return f"/api/v1/images/{rel_path}"
+    except Exception:
+        return None
 
 
 def _build_retrieval_agent(request: Request, postgres, cache_svc) -> RetrievalAgent:
@@ -173,7 +207,8 @@ async def chat_query(
     latency_ms = int((time.time() - start_time) * 1000)
 
     # 5. Build structured multimodal response
-    images_list = []
+    images_list: list[ImageEvidence] = []
+    seen_image_urls: set[str] = set()
     tables_list = []
     pages_list: set[int] = set()
 
@@ -181,12 +216,23 @@ async def chat_query(
         if item.page_number:
             pages_list.add(item.page_number)
         if item.chunk_type in ("IMAGE", "DIAGRAM"):
-            images_list.append({
-                "chunk_id": item.chunk_id,
-                "document_id": str(item.document_id),
-                "page_number": item.page_number,
-                "url": f"/api/v1/images/{item.document_id}_page_{item.page_number}.png",
-            })
+            img_path = getattr(item, "image_path", "") or (
+                item.metadata.get("image_path", "") if isinstance(item.metadata, dict) else ""
+            )
+            url = _image_path_to_url(img_path, settings.processed_storage_path)
+            if url and url not in seen_image_urls:
+                seen_image_urls.add(url)
+                images_list.append(
+                    ImageEvidence(
+                        url=url,
+                        page=item.page_number or 1,
+                        source=getattr(item, "file_name", None) or (
+                            item.metadata.get("file_name") if isinstance(item.metadata, dict) else None
+                        ),
+                        caption=item.content[:300] if item.content else None,
+                        chunk_id=item.chunk_id,
+                    )
+                )
         elif item.chunk_type == "TABLE":
             tables_list.append({
                 "chunk_id": item.chunk_id,

@@ -33,6 +33,16 @@ class SourceRef(BaseModel):
     page_number: int
 
 
+class ImageEvidence(BaseModel):
+    """A relevant figure/diagram associated with retrieved evidence."""
+
+    url: str = Field(..., description="HTTP-accessible URL via /api/v1/images/")
+    page: int = Field(..., description="Page number the figure appears on")
+    source: str | None = Field(default=None, description="Original document filename")
+    caption: str | None = Field(default=None, description="Figure caption or vision summary")
+    chunk_id: str = Field(default="", description="Source chunk identifier")
+
+
 class QueryRequest(BaseModel):
     """POST /api/v1/chat or /search request body."""
 
@@ -52,7 +62,7 @@ class QueryResponse(BaseModel):
     confidence_score: float = Field(default=1.0)
     evidence: list[EvidenceSnippet] = Field(default_factory=list)
     sources: list[SourceRef] = Field(default_factory=list)
-    images: list[dict] = Field(default_factory=list)
+    images: list[ImageEvidence] = Field(default_factory=list)
     tables: list[dict] = Field(default_factory=list)
     pages: list[int] = Field(default_factory=list)
     retrieval_trace: dict = Field(default_factory=dict)

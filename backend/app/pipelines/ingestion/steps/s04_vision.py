@@ -8,21 +8,21 @@ from typing import Any
 
 from app.agents.supervisor.state import IngestionState
 from app.config.logging import get_logger
-from app.services.vision.service import VisionService
+from app.services.vision.vision_provider import BaseVisionProvider
 
 logger = get_logger(__name__)
 
 
 async def step(state: IngestionState, services: dict[str, Any]) -> IngestionState:
     """
-    Analyze all figures/diagrams found during parsing using local Ollama llava.
+    Analyze all figures/diagrams found during parsing using configured vision provider.
 
     Vision analysis results (functional_summary, components, relationships)
     are stored in each figure's 'vision_analysis' key for downstream chunking.
 
     Args:
         state: Current ingestion state (parsed_doc must be set).
-        services: Must contain 'vision' key → VisionService.
+        services: Must contain 'vision' key → BaseVisionProvider.
 
     Returns:
         Updated state with vision_analysis data embedded in parsed_doc figures.
@@ -33,7 +33,7 @@ async def step(state: IngestionState, services: dict[str, Any]) -> IngestionStat
         logger.warning("step.vision.skipped", reason="parsed_doc is None")
         return state
 
-    vision: VisionService = services["vision"]
+    vision: BaseVisionProvider = services["vision"]
     loop = asyncio.get_running_loop()
 
     pages = state.parsed_doc.get("pages", [])

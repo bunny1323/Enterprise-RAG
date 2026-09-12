@@ -28,7 +28,7 @@ from app.services.generation.llm import build_llm_provider
 from app.services.metadata.service import MetadataService
 from app.services.ocr.service import OCRService
 from app.services.storage.service import StorageService
-from app.services.vision.service import VisionService
+from app.services.vision.vision_provider import build_vision_provider
 from app.config.opentelemetry import setup_telemetry
 
 
@@ -39,6 +39,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     Everything before `yield` runs at startup; everything after at shutdown.
     """
     settings = get_settings(reload=True)
+    app.state.settings = settings
     configure_logging(debug=settings.debug)
     logger = get_logger(__name__)
 
@@ -129,10 +130,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     storage_service = StorageService(storage_client)
     parser_service = DocumentParserService()
     ocr_service = OCRService()
-    vision_service = VisionService(
-        ollama_base_url=settings.ollama_base_url,
-        model=settings.ollama_vision_model,
-    )
+    vision_service = build_vision_provider(settings)
     chunker_service = ChunkingService()
     metadata_service = MetadataService(config_dir="./config/industries")
 
@@ -153,6 +151,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     app.state.embedder = embedding_service
     app.state.llm_provider = llm_provider
+    app.state.vision = vision_service
     logger.info(
         "startup.embedding_ready",
         provider=settings.embedding_provider,

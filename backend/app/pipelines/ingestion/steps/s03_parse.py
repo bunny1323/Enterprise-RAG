@@ -9,7 +9,7 @@ from typing import Any
 from app.agents.supervisor.state import IngestionState
 from app.config.logging import get_logger
 from app.models.document import DocumentStatus
-from app.services.document_parser.service import DocumentParserService
+from app.services.document_parser.service import DocumentParserService, ParseProfile
 from app.config.settings import get_settings
 
 logger = get_logger(__name__)
@@ -62,14 +62,18 @@ async def step(
     # Therefore we MUST await it directly.
     #
     import os
-    from app.services.document_parser.service import ParseProfile
     
     file_name = os.path.basename(state.storage_path).lower()
     needs_high_accuracy = any(x in file_name for x in ["manual", "spec", "data", "table", "guide"])
     profile = ParseProfile.HIGH_ACCURACY if needs_high_accuracy else ParseProfile.BALANCED
-    
+
+    # Pass the persistent processed storage path so figures are saved under
+    # PROCESSED_STORAGE_PATH/figures/<doc_stem>/ and served via /api/v1/images/
+    settings = get_settings()
+    output_dir = settings.processed_storage_path
+
     logger.info("step.parse.profile_selected", document_id=str(state.document_id), profile=profile.value)
-    parsed_doc = await parser.parse(state.storage_path, profile=profile)
+    parsed_doc = await parser.parse(state.storage_path, profile=profile, output_dir=output_dir)
 
     # ---------------------------------------------------------
     # 3. Validate parser output
@@ -87,7 +91,7 @@ async def step(
         table_count = sum(len(p.get("tables", [])) for p in pages if isinstance(p, dict))
         if table_count == 0:
             logger.info("step.parse.retry_high_accuracy", document_id=str(state.document_id))
-            parsed_doc = await parser.parse(state.storage_path, profile=ParseProfile.HIGH_ACCURACY)
+            parsed_doc = await parser.parse(state.storage_path, profile=ParseProfile.HIGH_ACCURACY, output_dir=output_dir)
             pages = parsed_doc.get("pages", [])
 
     if pages is None:

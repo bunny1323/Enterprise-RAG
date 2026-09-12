@@ -26,7 +26,7 @@ class ParseProfile(str, Enum):
     HIGH_ACCURACY = "HIGH_ACCURACY"
 
 
-def _run_docling_in_process_queue(file_path: str, profile: str, result_queue: mp.Queue) -> None:
+def _run_docling_in_process_queue(file_path: str, profile: str, result_queue: mp.Queue, output_dir: str = "") -> None:
     """
     Runs IBM Docling extraction in a separate process.
     Communicates success/failure via the provided multiprocessing.Queue.
@@ -97,10 +97,16 @@ def _run_docling_in_process_queue(file_path: str, profile: str, result_queue: mp
             page_num: int,
         ) -> str:
             try:
-                out_dir = Path(tempfile.gettempdir()) / "rag_figures" / Path(source_path).stem
-                out_dir.mkdir(parents=True, exist_ok=True)
+                # Use persistent output_dir (PROCESSED_STORAGE_PATH/figures/<stem>) so
+                # images survive restarts and are served via /api/v1/images/.
+                # Fall back to tempdir only if no output_dir was provided.
+                if output_dir:
+                    base_dir = Path(output_dir) / "figures" / Path(source_path).stem
+                else:
+                    base_dir = Path(tempfile.gettempdir()) / "rag_figures" / Path(source_path).stem
+                base_dir.mkdir(parents=True, exist_ok=True)
 
-                out_path = out_dir / f"page{page_num}_{id(item)}.png"
+                out_path = base_dir / f"page{page_num}_{id(item)}.png"
 
                 image = item.get_image(doc)
 
@@ -185,10 +191,11 @@ class DocumentParserService:
         self._default_timeout = 300  # Default timeout in seconds
 
     async def parse(
-        self, 
-        file_path: str, 
+        self,
+        file_path: str,
         profile: ParseProfile = ParseProfile.BALANCED,
-        timeout: int | None = None
+        timeout: int | None = None,
+        output_dir: str = "",
     ) -> dict[str, Any]:
         """
         Parse a PDF file asynchronously using a bounded isolated process.
@@ -199,9 +206,14 @@ class DocumentParserService:
         
         ctx = mp.get_context("spawn")
         q = ctx.Queue()
+        # Derive the persistent figures output directory.
+        # Figures are stored under PROCESSED_STORAGE_PATH/figures/<doc_stem>/ so
+        # they are served by the existing /api/v1/images/ static mount.
+        from pathlib import Path as _Path
+        _target_dir = output_dir or str(_Path(file_path).parent)
         p = ctx.Process(
-            target=_run_docling_in_process_queue, 
-            args=(file_path, profile.value, q)
+            target=_run_docling_in_process_queue,
+            args=(file_path, profile.value, q, _target_dir)
         )
         
         p.start()

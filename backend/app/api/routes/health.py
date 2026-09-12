@@ -80,19 +80,31 @@ async def health_check(request: Request) -> dict:
         overall_healthy = False
         logger.warning("health.neo4j_failed", error=str(err))
 
-    # ── Ollama ─────────────────────────────────────────────────────────────────
-    try:
-        import httpx
+    # ── LLM Provider (Groq / Ollama) ──────────────────────────────────────────
+    settings = getattr(request.app.state, "settings", None)
+    if settings:
+        services["llm"] = f"configured ({settings.llm_provider}: {settings.llm_model})"
+    else:
+        services["llm"] = "ok"
 
-        settings = request.app.state.settings
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"{settings.ollama_base_url}/api/tags")
-            resp.raise_for_status()
-        services["ollama"] = "ok"
-    except Exception as err:
-        services["ollama"] = f"error: {str(err)}"
-        # Ollama is non-critical — degraded but not unhealthy for Phase 1
-        logger.warning("health.ollama_unavailable", error=str(err))
+    # ── Vision / Ollama ────────────────────────────────────────────────────────
+    vision_provider = getattr(settings, "vision_provider", "disabled") if settings else "disabled"
+    if vision_provider == "disabled":
+        services["vision"] = "disabled (ingestion-only, figures preserved and served)"
+        services["ollama"] = "not_required"
+    elif vision_provider == "ollama" and settings:
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                resp = await client.get(f"{settings.ollama_base_url}/api/tags")
+                resp.raise_for_status()
+            services["vision"] = f"ok (ollama: {settings.ollama_vision_model})"
+            services["ollama"] = "ok"
+        except Exception as err:
+            services["vision"] = f"unavailable ({str(err)})"
+            services["ollama"] = "unavailable (optional)"
+            logger.info("health.vision_ollama_unavailable", error=str(err))
 
     return {
         "status": "healthy" if overall_healthy else "degraded",

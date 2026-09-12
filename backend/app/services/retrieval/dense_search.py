@@ -56,6 +56,7 @@ class DenseSearchService:
                     section_title=r.get("section_title") or None,
                     file_name=r.get("file_name") or None,
                     context_prefix=r.get("context_prefix"),
+                    image_path=r.get("image_path") or "",
                     metadata=r,
                 )
             )

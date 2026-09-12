@@ -915,6 +915,7 @@ class ChunkingService:
             file_name=filename,
             context_prefix=ctx_prefix,
             embedding_representation=representation,
+            image_path=image_path,
             page_number=page_num,
             bounding_box=figure.get("bbox"),
             chunk_type=chunk_type,

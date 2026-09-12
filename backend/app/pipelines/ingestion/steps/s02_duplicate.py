@@ -104,7 +104,11 @@ async def _mark_as_exact_duplicate(
         canonical_document_id=str(canonical_id),
     )
 
-    # Mark document as DUPLICATE in PostgreSQL
+    # Store sha256 with a suffix to avoid the unique (tenant_id, sha256) constraint —
+    # the canonical document already owns the exact sha256 value. The
+    # canonical_document_id column is the authoritative duplicate reference.
+    dup_sha256 = f"{sha256}_dup_{state.document_id}"
+
     await postgres.execute(
         """
         UPDATE documents
@@ -114,7 +118,7 @@ async def _mark_as_exact_duplicate(
             progress_percent      = 100
         WHERE id = $4
         """,
-        sha256,
+        dup_sha256,
         DocumentStatus.DUPLICATE.value,
         canonical_id,
         state.document_id,
@@ -134,7 +138,7 @@ async def _mark_as_exact_duplicate(
 
     return state.model_copy(
         update={
-            "sha256": sha256,
+            "sha256": dup_sha256,
             "status": DocumentStatus.DUPLICATE,
             "dup_classification": "EXACT_DUP",
             "canonical_document_id": canonical_id,

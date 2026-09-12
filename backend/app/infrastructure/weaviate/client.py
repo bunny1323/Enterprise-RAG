@@ -167,6 +167,12 @@ class WeaviateClient:
                     description="Original uploaded filename",
                     skip_vectorization=True,
                 ),
+                wvc.config.Property(
+                    name="image_path",
+                    data_type=wvc.config.DataType.TEXT,
+                    description="Absolute filesystem path to extracted figure image",
+                    skip_vectorization=True,
+                ),
             ],
         )
         logger.info("weaviate.collection_created", name=_COLLECTION_NAME)
@@ -184,6 +190,7 @@ class WeaviateClient:
             ("section_title",  wvc.config.DataType.TEXT, "Canonical section title",           False),
             ("file_name",      wvc.config.DataType.TEXT, "Original uploaded filename",        True),
             ("section_number", wvc.config.DataType.INT,  "Parsed section number",             True),
+            ("image_path",     wvc.config.DataType.TEXT, "Filesystem path to figure image",  True),
         ]
         for name, dtype, desc, skip_vec in additions:
             if name not in existing:
@@ -275,6 +282,7 @@ class WeaviateClient:
                     "section_number": chunk.section_number,
                     "section_title": chunk.section_title or "",
                     "file_name": chunk.file_name or "",
+                    "image_path": chunk.image_path or "",
                 }
                 batch.add_object(properties=properties, vector=vector)
 

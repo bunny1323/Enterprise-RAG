@@ -45,6 +45,10 @@ class Chunk(BaseModel):
     file_name: str | None = Field(default=None, description="Original uploaded filename")
     context_prefix: str | None = Field(default=None, description="Document + Section contextual prefix")
     embedding_representation: str = Field(default="text", description="Representation type (text | image | text_summary_of_image)")
+    image_path: str = Field(
+        default="",
+        description="Absolute filesystem path to the extracted figure image (empty for non-image chunks)",
+    )
     access_classification: str = Field(
         default="INTERNAL",
         description="Security classification (PUBLIC | INTERNAL | RESTRICTED)",

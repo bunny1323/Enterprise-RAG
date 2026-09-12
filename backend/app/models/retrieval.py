@@ -22,6 +22,7 @@ class SearchResult(BaseModel):
     file_name: str | None = None
     subsection: str | None = None
     context_prefix: str | None = None
+    image_path: str = Field(default="", description="Absolute path to extracted figure image (empty for non-image chunks)")
     metadata: dict = Field(default_factory=dict)
 
 
