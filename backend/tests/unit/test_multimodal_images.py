@@ -20,9 +20,10 @@ from app.services.vision.vision_provider import (
 def test_chunk_model_has_image_path():
     chunk = Chunk(
         chunk_id="chk-1",
-        document_id="doc-1",
+        document_id="11111111-1111-4111-8111-111111111111",
         tenant_id="tenant-1",
         content="Test content",
+        page_number=1,
         chunk_type="IMAGE",
         image_path="/data/processed/figures/doc1/page1_123.png",
     )
@@ -55,6 +56,9 @@ def test_image_evidence_model():
     resp = QueryResponse(
         answer="The diagram shows the hydraulic pump setup.",
         images=[img],
+        trace_id="trace-1",
+        retrieval_strategy="vector",
+        latency_ms=12,
     )
     assert len(resp.images) == 1
     assert resp.images[0].url == img.url
@@ -124,3 +128,34 @@ def test_build_vision_provider_factory():
     settings.vision_provider = "ollama"
     provider_ollama = build_vision_provider(settings)
     assert isinstance(provider_ollama, OllamaVisionProvider)
+
+
+@pytest.mark.skipif(not Path("/tmp").exists(), reason="filesystem not available for local live test")
+def test_ollama_vision_provider_analyzes_real_image():
+    import httpx
+
+    try:
+        resp = httpx.get("http://localhost:11434/api/tags", timeout=5.0)
+        resp.raise_for_status()
+        available = resp.json().get("models", [])
+        if not any(model.get("name") == "qwen2.5vl:3b" for model in available):
+            pytest.skip("qwen2.5vl:3b not installed locally")
+    except Exception as exc:
+        pytest.skip(f"Ollama unavailable for live vision test: {exc}")
+
+    provider = OllamaVisionProvider(ollama_base_url="http://localhost:11434", model="qwen2.5vl:3b")
+    image_path = Path(tempfile.gettempdir()) / "enterprise_rag_vision_probe.png"
+    from PIL import Image
+
+    Image.new("RGB", (128, 128), color="lightblue").save(image_path)
+
+    try:
+        result = provider.analyze_diagram(str(image_path))
+        assert isinstance(result, dict)
+        assert result.get("functional_summary")
+        assert result.get("components") or result.get("spatial_layout")
+        assert result.get("status") != "failed"
+    finally:
+        provider.close()
+        if image_path.exists():
+            image_path.unlink()

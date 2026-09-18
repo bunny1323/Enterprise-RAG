@@ -98,36 +98,87 @@ class VisionService:
         response.raise_for_status()
 
         raw_text: str = response.json().get("response", "")
-        result = self._parse_json_response(raw_text)
+        result = self._parse_json_response(raw_text, image_path)
 
         logger.info(
             "vision.analyze_complete",
             image=image_path,
+            model=self._model,
             components=len(result.get("components", [])),
         )
         return result
 
-    def _parse_json_response(self, raw: str) -> dict[str, Any]:
+    def _parse_json_response(self, raw: str, image_path: str | None = None) -> dict[str, Any]:
         """
         Extract and parse a JSON object from the model's raw text output.
 
         Handles cases where the model wraps JSON in markdown code fences.
+        Accepts either the required structured schema or a generic Ollama answer
+        and normalizes it into a diagram-analysis payload.
         """
-        # Strip markdown code fences if present
-        cleaned = re.sub(r"```(?:json)?\s*", "", raw).strip().rstrip("`").strip()
-
-        # Find the first { ... } block
+        cleaned = re.sub(r"```(?:json)?\s*", "", raw or "").strip().rstrip("`").strip()
         start = cleaned.find("{")
         end = cleaned.rfind("}") + 1
+
         if start == -1 or end == 0:
-            logger.warning("vision.json_not_found", raw=raw[:200])
-            return self._empty_result()
+            msg = "Ollama returned no valid JSON object for diagram analysis."
+            logger.error("vision.json_not_found", image=image_path, raw=raw[:200] if raw else "")
+            raise ValueError(msg)
 
         try:
-            return json.loads(cleaned[start:end])
-        except json.JSONDecodeError as err:
-            logger.warning("vision.json_parse_error", error=str(err), raw=raw[:200])
-            return self._empty_result()
+            parsed = json.loads(cleaned[start:end])
+            if not isinstance(parsed, dict):
+                raise ValueError("Ollama response was not a JSON object.")
+            return self._normalize_result(parsed)
+        except (json.JSONDecodeError, ValueError) as err:
+            logger.error(
+                "vision.json_parse_error",
+                image=image_path,
+                error=str(err),
+                raw=raw[:200] if raw else "",
+            )
+            raise ValueError(f"Failed to parse Ollama vision response: {err}") from err
+
+    @staticmethod
+    def _normalize_result(parsed: dict[str, Any]) -> dict[str, Any]:
+        required_keys = {"functional_summary", "components", "relationships", "spatial_layout"}
+        if required_keys.issubset(parsed.keys()):
+            result = dict(parsed)
+            result.setdefault("status", "ok")
+            return result
+
+        summary = (
+            parsed.get("functional_summary")
+            or parsed.get("summary")
+            or parsed.get("description")
+            or parsed.get("text")
+            or parsed.get("answer")
+            or "Vision analysis unavailable"
+        )
+        components = parsed.get("components") or parsed.get("objects") or parsed.get("visible_components") or []
+        if isinstance(components, str):
+            components = [components]
+        if not isinstance(components, list):
+            components = []
+
+        relationships = parsed.get("relationships") or []
+        if not isinstance(relationships, list):
+            relationships = []
+
+        spatial_layout = (
+            parsed.get("spatial_layout")
+            or parsed.get("layout")
+            or parsed.get("diagram_layout")
+            or "Unknown"
+        )
+
+        return {
+            "functional_summary": str(summary),
+            "components": [str(item) for item in components if item is not None],
+            "relationships": relationships,
+            "spatial_layout": str(spatial_layout),
+            "status": "ok",
+        }
 
     @staticmethod
     def _empty_result() -> dict[str, Any]:
@@ -136,6 +187,7 @@ class VisionService:
             "components": [],
             "relationships": [],
             "spatial_layout": "Unknown",
+            "status": "failed",
         }
 
     def close(self) -> None:

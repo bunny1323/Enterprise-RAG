@@ -7,12 +7,14 @@ from typing import Any
 
 from app.config.logging import get_logger
 from app.services.vision.service import VisionService
-
 logger = get_logger(__name__)
 
 
 class BaseVisionProvider(ABC):
     """Abstract interface for technical diagram/schematic vision analysis."""
+
+    provider_name: str = "base"
+    model_name: str = "n/a"
 
     @abstractmethod
     def analyze_diagram(self, image_path: str) -> dict[str, Any]:
@@ -37,13 +39,22 @@ class DisabledVisionProvider(BaseVisionProvider):
     Returns empty analysis structure without failing. Images are still extracted and served.
     """
 
+    provider_name = "disabled"
+    model_name = "disabled"
+
     def analyze_diagram(self, image_path: str) -> dict[str, Any]:
-        logger.debug("vision.disabled.skip_analysis", image=image_path)
+        logger.info(
+            "vision.disabled.skip_analysis",
+            provider=self.provider_name,
+            model=self.model_name,
+            image=image_path,
+        )
         return {
             "functional_summary": "Vision analysis disabled",
             "components": [],
             "relationships": [],
             "spatial_layout": "Unknown",
+            "status": "skipped",
         }
 
     def close(self) -> None:
@@ -56,11 +67,38 @@ class OllamaVisionProvider(BaseVisionProvider):
     Wraps existing VisionService.
     """
 
+    provider_name = "ollama"
+
     def __init__(self, ollama_base_url: str, model: str = "qwen2.5vl:3b") -> None:
+        self.model_name = model
         self._service = VisionService(ollama_base_url=ollama_base_url, model=model)
 
     def analyze_diagram(self, image_path: str) -> dict[str, Any]:
-        return self._service.analyze_diagram(image_path)
+        logger.info(
+            "vision.ollama.figure_start",
+            provider=self.provider_name,
+            model=self.model_name,
+            image=image_path,
+        )
+        try:
+            result = self._service.analyze_diagram(image_path)
+            logger.info(
+                "vision.ollama.figure_analyzed",
+                provider=self.provider_name,
+                model=self.model_name,
+                image=image_path,
+                components=len(result.get("components", [])),
+            )
+            return result
+        except Exception as exc:
+            logger.error(
+                "vision.ollama.analysis_failed",
+                provider=self.provider_name,
+                model=self.model_name,
+                image=image_path,
+                error=str(exc),
+            )
+            raise
 
     def close(self) -> None:
         self._service.close()

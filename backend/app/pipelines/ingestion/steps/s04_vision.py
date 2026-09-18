@@ -34,11 +34,15 @@ async def step(state: IngestionState, services: dict[str, Any]) -> IngestionStat
         return state
 
     vision: BaseVisionProvider = services["vision"]
+    provider_name = getattr(vision, "provider_name", vision.__class__.__name__.lower())
+    model_name = getattr(vision, "model_name", "n/a")
     loop = asyncio.get_running_loop()
 
     pages = state.parsed_doc.get("pages", [])
     total_figures = 0
     analyzed_figures = 0
+    skipped_figures = 0
+    failed_figures = 0
 
     for page_data in pages:
         for figure in page_data.get("figures", []):
@@ -46,40 +50,72 @@ async def step(state: IngestionState, services: dict[str, Any]) -> IngestionStat
             total_figures += 1
 
             if not image_path:
-                logger.debug(
-                    "step.vision.skip_figure",
-                    reason="no image_path",
+                logger.info(
+                    "step.vision.figure_skip",
+                    provider=provider_name,
+                    model=model_name,
                     page=page_data.get("page_num"),
+                    reason="no image_path",
+                )
+                continue
+
+            if provider_name == "disabled":
+                skipped_figures += 1
+                figure["vision_analysis"] = {
+                    "functional_summary": "Vision analysis disabled",
+                    "components": [],
+                    "relationships": [],
+                    "spatial_layout": "Unknown",
+                    "status": "skipped",
+                }
+                logger.info(
+                    "step.vision.figure_skipped",
+                    provider=provider_name,
+                    model=model_name,
+                    image=image_path,
+                    reason="VISION_PROVIDER=disabled",
                 )
                 continue
 
             try:
-                # Run blocking Ollama HTTP call in thread pool
                 analysis = await loop.run_in_executor(
                     None, vision.analyze_diagram, image_path
                 )
                 figure["vision_analysis"] = analysis
                 analyzed_figures += 1
 
-                logger.debug(
+                logger.info(
                     "step.vision.figure_analyzed",
+                    provider=provider_name,
+                    model=model_name,
                     image=image_path,
                     components=len(analysis.get("components", [])),
                 )
             except Exception as err:
-                logger.warning(
-                    "step.vision.figure_error",
+                failed_figures += 1
+                logger.error(
+                    "step.vision.figure_failed",
+                    provider=provider_name,
+                    model=model_name,
                     image=image_path,
                     error=str(err),
                 )
-                # Non-fatal: continue processing remaining figures
-                figure["vision_analysis"] = {}
+                figure["vision_analysis"] = {
+                    "functional_summary": "Vision analysis failed",
+                    "components": [],
+                    "relationships": [],
+                    "spatial_layout": "Unknown",
+                    "status": "failed",
+                    "error": str(err),
+                }
 
     logger.info(
         "step.vision.complete",
         document_id=str(state.document_id),
         total=total_figures,
         analyzed=analyzed_figures,
+        skipped=skipped_figures,
+        failed=failed_figures,
     )
 
     return state.model_copy(update={"parsed_doc": state.parsed_doc})
