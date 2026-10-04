@@ -42,22 +42,21 @@ async def step(state: IngestionState, services: dict[str, Any]) -> IngestionStat
     if existing_row is not None:
         return await _mark_as_exact_duplicate(state, postgres, sha256, UUID(str(existing_row["id"])))
 
-    # ── 3. Handle FAILED Document Overlap ────────────────────────────────────
-    failed_doc = await dedup_service.get_failed_document_by_hash(
-        sha256=sha256,
-        tenant_id=state.tenant_id,
-        current_doc_id=state.document_id,
-        postgres=postgres,
+    # ── 3. Handle Incomplete / Stale Document Overlap (FAILED, TIMEOUT, etc.) ─
+    # Neutralize sha256 on any previous non-completed documents so this fresh attempt can succeed
+    await postgres.execute(
+        """
+        UPDATE documents
+        SET sha256 = sha256 || '_inactive_' || id::text
+        WHERE sha256 = $1
+          AND tenant_id = $2
+          AND id != $3
+          AND status != 'COMPLETED'
+        """,
+        sha256,
+        state.tenant_id,
+        state.document_id,
     )
-    if failed_doc is not None:
-        failed_id = str(failed_doc["id"])
-        logger.info("step.duplicate.cleaning_failed_doc", failed_id=failed_id)
-        # Rename the FAILED doc's sha256 to allow this new retry to succeed
-        await postgres.execute(
-            "UPDATE documents SET sha256 = $1 WHERE id = $2",
-            f"{sha256}_failed_{failed_id}",
-            UUID(failed_id)
-        )
 
     # ── 4. Unique File Assignment (Concurrency Safe) ─────────────────────────
     logger.info(

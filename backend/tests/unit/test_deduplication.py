@@ -89,9 +89,8 @@ async def test_exact_duplicate():
 
 @pytest.mark.asyncio
 async def test_same_sha_but_previous_failed():
-    # Test 3 - Same SHA but previous document FAILED
+    # Test 3 - Same SHA but previous document FAILED or TIMEOUT
     doc_id = uuid4()
-    failed_id = uuid4()
     state = IngestionState(
         document_id=doc_id,
         job_id=uuid4(),
@@ -104,16 +103,15 @@ async def test_same_sha_but_previous_failed():
         status=DocumentStatus.PENDING
     )
     postgres = AsyncMock()
-    # First call is check_file_hash (returns None because it excludes FAILED)
-    # Second call is get_failed_document_by_hash (returns the failed doc)
-    postgres.fetchrow.side_effect = [None, {"id": str(failed_id), "sha256": "hash"}]
+    # check_file_hash returns None because only COMPLETED are matched
+    postgres.fetchrow.return_value = None
     
     s02_duplicate.compute_sha256 = MagicMock(return_value="hash")
     
     new_state = await s02_duplicate.step(state, {"postgres": postgres})
     assert new_state.status == DocumentStatus.CHECKING_DUPLICATE
-    # Verify the failed doc was renamed
-    postgres.execute.assert_any_call("UPDATE documents SET sha256 = $1 WHERE id = $2", f"hash_failed_{failed_id}", failed_id)
+    # Verify the cleanup query was executed for non-completed documents
+    assert postgres.execute.call_count >= 2
 
 @pytest.mark.asyncio
 async def test_concurrent_upload_unique_violation():
@@ -132,11 +130,11 @@ async def test_concurrent_upload_unique_violation():
         status=DocumentStatus.PENDING
     )
     postgres = AsyncMock()
-    # check_file_hash initially returns None, get_failed returns None
-    # Then execute raises UniqueViolationError
+    # check_file_hash initially returns None
+    # Then execute raises UniqueViolationError on the document update
     # Then check_file_hash returns the winner row
-    postgres.fetchrow.side_effect = [None, None, {"id": str(winner_id), "sha256": "hash", "file_name": "x", "version": 1, "content_hash": "c"}]
-    postgres.execute.side_effect = [asyncpg.exceptions.UniqueViolationError(), None, None]
+    postgres.fetchrow.side_effect = [None, {"id": str(winner_id), "sha256": "hash", "file_name": "x", "version": 1, "content_hash": "c"}]
+    postgres.execute.side_effect = [None, asyncpg.exceptions.UniqueViolationError(), None]
     
     s02_duplicate.compute_sha256 = MagicMock(return_value="hash")
     

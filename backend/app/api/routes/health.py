@@ -87,24 +87,45 @@ async def health_check(request: Request) -> dict:
     else:
         services["llm"] = "ok"
 
-    # ── Vision / Ollama ────────────────────────────────────────────────────────
+    # ── Vision Provider ───────────────────────────────────────────────────────
     vision_provider = getattr(settings, "vision_provider", "disabled") if settings else "disabled"
-    if vision_provider == "disabled":
-        services["vision"] = "disabled (ingestion-only, figures preserved and served)"
-        services["ollama"] = "not_required"
-    elif vision_provider == "ollama" and settings:
-        try:
-            import httpx
 
-            async with httpx.AsyncClient(timeout=3.0) as client:
-                resp = await client.get(f"{settings.ollama_base_url}/api/tags")
-                resp.raise_for_status()
-            services["vision"] = f"ok (ollama: {settings.ollama_vision_model})"
-            services["ollama"] = "ok"
-        except Exception as err:
-            services["vision"] = f"unavailable ({str(err)})"
-            services["ollama"] = "unavailable (optional)"
-            logger.info("health.vision_ollama_unavailable", error=str(err))
+    if vision_provider == "disabled":
+        services["vision"] = "disabled (figures extracted and served; no VLM analysis)"
+        services["ollama"] = "not_required"
+
+    elif vision_provider == "gemini":
+        gemini_model = getattr(settings, "gemini_vision_model", "gemini-3.8-flash") if settings else "unknown"
+        api_key = getattr(settings, "gemini_api_key", "") if settings else ""
+        if not api_key:
+            services["vision"] = "misconfigured: GEMINI_API_KEY not set"
+            # Missing key is a config error — flag as degraded
+            overall_healthy = False
+        else:
+            try:
+                import httpx
+                # Lightweight reachability check against Gemini REST endpoint
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    resp = await client.get(
+                        f"https://generativelanguage.googleapis.com/v1beta/models/{gemini_model}",
+                        params={"key": api_key},
+                    )
+                if resp.status_code == 200:
+                    services["vision"] = f"ok (gemini: {gemini_model})"
+                elif resp.status_code == 403:
+                    services["vision"] = f"auth_error: check GEMINI_API_KEY (gemini: {gemini_model})"
+                    overall_healthy = False
+                elif resp.status_code == 404:
+                    services["vision"] = f"model_not_found: {gemini_model} — check GEMINI_VISION_MODEL"
+                    overall_healthy = False
+                else:
+                    services["vision"] = f"degraded: HTTP {resp.status_code} (gemini: {gemini_model})"
+            except Exception as err:
+                services["vision"] = f"unreachable: {str(err)[:80]} (gemini: {gemini_model})"
+                logger.info("health.vision_gemini_unreachable", error=str(err))
+        services["ollama"] = "not_required"
+
+
 
     return {
         "status": "healthy" if overall_healthy else "degraded",

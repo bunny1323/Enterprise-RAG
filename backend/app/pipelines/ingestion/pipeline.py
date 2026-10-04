@@ -117,9 +117,15 @@ class IngestionPipeline:
                     postgres, doc_id, job_id, step_name, job_status.value, progress_after
                 )
 
-                # Determine timeout for this step
+                # Determine timeout for this step.
+                # Prefer the _override variant first (set via INGESTION_TIMEOUT_<STEP> env var),
+                # then the base attribute, then the global 600s fallback.
                 settings = get_settings()
-                timeout = getattr(settings, f"ingestion_timeout_{step_name}", 300)
+                timeout = getattr(
+                    settings,
+                    f"ingestion_timeout_{step_name}_override",
+                    None,
+                ) or getattr(settings, f"ingestion_timeout_{step_name}", 600)
 
                 # Execute step with timeout
                 state = await asyncio.wait_for(
@@ -154,7 +160,20 @@ class IngestionPipeline:
             except asyncio.TimeoutError:
                 err_msg = f"Step '{step_name}' timed out after {timeout}s"
                 logger.error("pipeline.step_timeout", step=step_name, document_id=str(doc_id))
-                await self._update_timeout_status(postgres, doc_id, job_id, err_msg)
+                # asyncio.shield prevents the CancelledError from the wait_for timeout
+                # from propagating into the DB update coroutine — without it, the
+                # asyncpg connection attempt itself gets cancelled.
+                try:
+                    await asyncio.shield(
+                        self._update_timeout_status(postgres, doc_id, job_id, err_msg)
+                    )
+                except Exception as db_err:
+                    logger.error(
+                        "pipeline.timeout_status_write_failed",
+                        step=step_name,
+                        document_id=str(doc_id),
+                        error=str(db_err),
+                    )
                 raise TimeoutError(err_msg)
 
             except Exception as err:

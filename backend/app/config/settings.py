@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     ingestion_timeout_validation: int = Field(default=30)
     ingestion_timeout_duplicate: int = Field(default=60)
     ingestion_timeout_parse: int = Field(default=900)
-    ingestion_timeout_vision: int = Field(default=600)
+    ingestion_timeout_vision: int = Field(default=7200)
     ingestion_timeout_chunk: int = Field(default=300)
     ingestion_timeout_incremental: int = Field(default=300)
     ingestion_timeout_metadata: int = Field(default=120)
@@ -65,18 +65,53 @@ class Settings(BaseSettings):
     neo4j_user: str = Field(default="neo4j")
     neo4j_password: str = Field(...)
 
-    # Vision Provider ("disabled" for cloud/Render; "ollama" for local ingestion)
+    # Vision Provider ("disabled" for cloud/Render; "gemini" for cloud ingestion)
     vision_provider: str = Field(
         default="disabled",
         validation_alias=AliasChoices("VISION_PROVIDER", "VISION_SERVICE_PROVIDER"),
     )
-
-    # Ollama
-    ollama_base_url: str = Field(default="http://localhost:11434")
-    ollama_vision_model: str = Field(
-        default="qwen2.5vl:3b",
-        validation_alias=AliasChoices("OLLAMA_VISION_MODEL", "VISION_MODEL"),
+    vision_max_concurrency: int = Field(
+        default=1,
+        gt=0,
+        validation_alias=AliasChoices("VISION_MAX_CONCURRENCY"),
     )
+    vision_request_timeout: float = Field(
+        default=600.0,
+        gt=0,
+        validation_alias=AliasChoices("VISION_REQUEST_TIMEOUT"),
+    )
+    vision_max_retries: int = Field(
+        default=1,
+        ge=0,
+        validation_alias=AliasChoices("VISION_MAX_RETRIES"),
+    )
+    vision_max_image_dimension: int = Field(
+        default=1024,
+        gt=0,
+        validation_alias=AliasChoices("VISION_MAX_IMAGE_DIMENSION"),
+    )
+    vision_cache_dir: str = Field(
+        default="./data/processed/vision_cache",
+        validation_alias=AliasChoices("VISION_CACHE_DIR"),
+    )
+    ingestion_timeout_vision_override: int = Field(
+        default=7200,
+        gt=0,
+        validation_alias=AliasChoices("INGESTION_TIMEOUT_VISION"),
+    )
+
+    # Gemini Cloud Vision (primary cloud provider, VISION_PROVIDER=gemini)
+    gemini_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("GEMINI_API_KEY"),
+    )
+    gemini_vision_model: str = Field(
+        default="gemini-3.8-flash",
+        validation_alias=AliasChoices("GEMINI_VISION_MODEL"),
+    )
+
+    # Ollama (optional local-dev fallback for LLM)
+    ollama_base_url: str = Field(default="http://localhost:11434")
     ollama_model: str = Field(default="qwen2.5:7b")
     ollama_timeout: float = Field(default=120.0, gt=0, validation_alias=AliasChoices("OLLAMA_TIMEOUT", "LLM_FALLBACK_TIMEOUT"))
 
@@ -101,6 +136,7 @@ class Settings(BaseSettings):
         "raw_storage_path",
         "processed_storage_path",
         "chunks_storage_path",
+        "vision_cache_dir",
         mode="after",
     )
     @classmethod

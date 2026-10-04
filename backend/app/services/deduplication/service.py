@@ -53,7 +53,7 @@ class DeduplicationService:
             """
             SELECT id, sha256, file_name, version, content_hash
             FROM documents
-            WHERE sha256 = $1 AND tenant_id = $2 AND id != $3 AND status != 'FAILED'
+            WHERE sha256 = $1 AND tenant_id = $2 AND id != $3 AND status = 'COMPLETED'
             ORDER BY created_at DESC
             LIMIT 1
             """,
@@ -91,7 +91,7 @@ class DeduplicationService:
             """
             SELECT id, sha256, file_name, version, content_hash
             FROM documents
-            WHERE content_hash = $1 AND tenant_id = $2 AND id != $3 AND status != 'FAILED'
+            WHERE content_hash = $1 AND tenant_id = $2 AND id != $3 AND status = 'COMPLETED'
             ORDER BY created_at DESC
             LIMIT 1
             """,

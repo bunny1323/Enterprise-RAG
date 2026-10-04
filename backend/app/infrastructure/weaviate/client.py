@@ -291,13 +291,13 @@ class WeaviateClient:
     def delete_by_document(self, document_id: str, tenant_id: str = "default") -> None:
         """Delete all chunks belonging to a document under tenant isolation."""
         client = self._require_client()
+        if not client.collections.exists(_COLLECTION_NAME):
+            return
         collection = client.collections.get(_COLLECTION_NAME)
-        collection.data.delete_many(
-            where=(
-                wvc.query.Filter.by_property("document_id").equal(document_id)
-                & wvc.query.Filter.by_property("tenant_id").equal(tenant_id)
-            )
-        )
+        flt = wvc.query.Filter.by_property("document_id").equal(str(document_id))
+        if tenant_id and tenant_id not in ("all", "*"):
+            flt = flt & wvc.query.Filter.by_property("tenant_id").equal(tenant_id)
+        collection.data.delete_many(where=flt)
         logger.info("weaviate.chunks_deleted", document_id=document_id, tenant_id=tenant_id)
 
     # ── Retrieval Operations ───────────────────────────────────────────────────

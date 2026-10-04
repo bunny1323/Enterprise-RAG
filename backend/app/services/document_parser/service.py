@@ -249,12 +249,12 @@ class DocumentParserService:
 
         except asyncio.TimeoutError:
             logger.error("parser.docling_timeout", path=file_path, timeout=active_timeout)
-            # Re-raise it so the pipeline catches it and sets TIMEOUT status!
-            raise
+            logger.warning("parser.docling_timeout_fallback", path=file_path)
+            return await self._parse_with_pymupdf(file_path, output_dir=output_dir)
 
         except Exception as docling_err:
             logger.warning("parser.docling_failed_fallback", error=str(docling_err), path=file_path)
-            return await self._parse_with_pymupdf(file_path)
+            return await self._parse_with_pymupdf(file_path, output_dir=output_dir)
             
         finally:
             # Cleanup process if it's still alive (crucial for timeout/cancellation)
@@ -266,16 +266,31 @@ class DocumentParserService:
                     p.kill()
             q.close()
 
-    async def _parse_with_pymupdf(self, file_path: str) -> dict[str, Any]:
+    async def _parse_with_pymupdf(
+        self,
+        file_path: str,
+        output_dir: str = "",
+    ) -> dict[str, Any]:
         """Fallback parser using PyMuPDF (run in default thread pool to avoid blocking)."""
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self._sync_parse_pymupdf, file_path)
+        return await loop.run_in_executor(
+            None,
+            self._sync_parse_pymupdf,
+            file_path,
+            output_dir,
+        )
 
-    def _sync_parse_pymupdf(self, file_path: str) -> dict[str, Any]:
+    def _sync_parse_pymupdf(
+        self,
+        file_path: str,
+        output_dir: str = "",
+    ) -> dict[str, Any]:
         import fitz  # type: ignore[import-untyped]
         start_time = time.time()
         doc = fitz.open(file_path)
         pages: list[dict[str, Any]] = []
+
+        figures_dir = Path(output_dir or Path(file_path).parent) / "figures" / Path(file_path).stem
 
         for page_idx in range(len(doc)):
             page = doc[page_idx]
@@ -306,7 +321,20 @@ class DocumentParserService:
                 item_type = "SectionHeaderItem" if _is_section_heading else "TextItem"
                 text_blocks.append({"text": text, "bbox": list(b), "page_num": page_num, "item_type": item_type})
 
-            pages.append({"page_num": page_num, "text_blocks": text_blocks, "tables": [], "figures": []})
+            figures: list[dict[str, Any]] = []
+            if page.get_drawings():
+                figures_dir.mkdir(parents=True, exist_ok=True)
+                image_path = figures_dir / f"page{page_num}_pymupdf.png"
+                pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+                pixmap.save(str(image_path))
+                figures.append({
+                    "image_path": str(image_path),
+                    "bbox": [0.0, 0.0, float(page.rect.width), float(page.rect.height)],
+                    "page_num": page_num,
+                    "caption": "Rendered vector content",
+                })
+
+            pages.append({"page_num": page_num, "text_blocks": text_blocks, "tables": [], "figures": figures})
 
         doc.close()
         duration = time.time() - start_time
@@ -317,7 +345,7 @@ class DocumentParserService:
                 "page_count": len(pages),
                 "ocr_required_count": 0,
                 "table_required_count": 0,
-                "vision_required_count": 0,
+                "vision_required_count": sum(len(page["figures"]) for page in pages),
                 "parser_profile": "FALLBACK_PYMUPDF"
             }
         }

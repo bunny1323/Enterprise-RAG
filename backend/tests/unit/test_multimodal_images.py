@@ -3,6 +3,7 @@ Unit tests for multimodal query images and vision provider features.
 """
 from pathlib import Path
 import tempfile
+from unittest.mock import patch
 import pytest
 
 from app.api.routes.query import _image_path_to_url
@@ -12,7 +13,6 @@ from app.models.retrieval import SearchResult
 from app.services.vision.vision_provider import (
     BaseVisionProvider,
     DisabledVisionProvider,
-    OllamaVisionProvider,
     build_vision_provider,
 )
 
@@ -116,46 +116,16 @@ def test_disabled_vision_provider():
 
 
 def test_build_vision_provider_factory():
+    from app.services.vision import vision_provider as vp
+
     class MockSettings:
         vision_provider = "disabled"
-        ollama_base_url = "http://localhost:11434"
-        ollama_vision_model = "qwen2.5vl:3b"
 
     settings = MockSettings()
-    provider = build_vision_provider(settings)
-    assert isinstance(provider, DisabledVisionProvider)
-
-    settings.vision_provider = "ollama"
-    provider_ollama = build_vision_provider(settings)
-    assert isinstance(provider_ollama, OllamaVisionProvider)
+    provider = vp.build_vision_provider(settings)
+    assert isinstance(provider, vp.DisabledVisionProvider)
+    assert provider.provider_name == "disabled"
+    provider.close()
 
 
-@pytest.mark.skipif(not Path("/tmp").exists(), reason="filesystem not available for local live test")
-def test_ollama_vision_provider_analyzes_real_image():
-    import httpx
 
-    try:
-        resp = httpx.get("http://localhost:11434/api/tags", timeout=5.0)
-        resp.raise_for_status()
-        available = resp.json().get("models", [])
-        if not any(model.get("name") == "qwen2.5vl:3b" for model in available):
-            pytest.skip("qwen2.5vl:3b not installed locally")
-    except Exception as exc:
-        pytest.skip(f"Ollama unavailable for live vision test: {exc}")
-
-    provider = OllamaVisionProvider(ollama_base_url="http://localhost:11434", model="qwen2.5vl:3b")
-    image_path = Path(tempfile.gettempdir()) / "enterprise_rag_vision_probe.png"
-    from PIL import Image
-
-    Image.new("RGB", (128, 128), color="lightblue").save(image_path)
-
-    try:
-        result = provider.analyze_diagram(str(image_path))
-        assert isinstance(result, dict)
-        assert result.get("functional_summary")
-        assert result.get("components") or result.get("spatial_layout")
-        assert result.get("status") != "failed"
-    finally:
-        provider.close()
-        if image_path.exists():
-            image_path.unlink()

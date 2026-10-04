@@ -4,6 +4,7 @@ Manages connection pool, schema initialization, and typed query helpers.
 """
 import json
 from typing import Any
+from uuid import UUID
 
 import asyncpg
 from asyncpg import Pool, Record
@@ -25,8 +26,8 @@ CREATE TABLE IF NOT EXISTS documents (
     knowledge_base_id     TEXT        NOT NULL DEFAULT 'default',
     content_hash          TEXT,
     version               INTEGER     DEFAULT 1,
-    canonical_document_id UUID        REFERENCES documents(id),
-    supersedes            UUID        REFERENCES documents(id),
+    canonical_document_id UUID        REFERENCES documents(id) ON DELETE SET NULL,
+    supersedes            UUID        REFERENCES documents(id) ON DELETE SET NULL,
     parser_version        TEXT,
     embedding_model       TEXT,
     embedding_model_version TEXT,
@@ -242,6 +243,13 @@ class PostgresClient:
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS version INTEGER DEFAULT 1",
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS canonical_document_id UUID",
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS supersedes UUID",
+            # Fix FK constraints on documents self-references to allow deletion
+            "ALTER TABLE documents DROP CONSTRAINT IF EXISTS documents_canonical_document_id_fkey",
+            "ALTER TABLE documents ADD CONSTRAINT documents_canonical_document_id_fkey FOREIGN KEY (canonical_document_id) REFERENCES documents(id) ON DELETE SET NULL",
+            "ALTER TABLE documents DROP CONSTRAINT IF EXISTS documents_supersedes_fkey",
+            "ALTER TABLE documents ADD CONSTRAINT documents_supersedes_fkey FOREIGN KEY (supersedes) REFERENCES documents(id) ON DELETE SET NULL",
+            # Neutralize stale uncompleted document hashes (TIMEOUT, FAILED) so they don't block new uploads
+            "UPDATE documents SET sha256 = sha256 || '_cleaned_' || id::text WHERE status IN ('TIMEOUT', 'FAILED') AND sha256 NOT LIKE '%_failed_%' AND sha256 NOT LIKE '%_cleaned_%' AND sha256 NOT LIKE '%_inactive_%'",
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS parser_version TEXT",
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS embedding_model TEXT",
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS embedding_model_version TEXT",
@@ -461,6 +469,68 @@ class PostgresClient:
         if self._pool:
             await self._pool.close()
             logger.info("postgres.pool_closed")
+
+    async def delete_document(self, document_id: Any) -> bool:
+        """
+        Completely delete a document from PostgreSQL, safely breaking self-referencing
+        constraints and cleaning up all dependent tables (chunks, jobs, checkpoints, structure, state).
+        Returns True if a document was deleted, False if it was not found.
+        """
+        doc_uuid = UUID(str(document_id))
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                # 1. Check if document exists
+                row = await conn.fetchrow("SELECT id FROM documents WHERE id = $1", doc_uuid)
+                if not row:
+                    return False
+
+                # 2. Delete any DUPLICATE placeholder documents that pointed to this canonical document
+                await conn.execute(
+                    "DELETE FROM documents WHERE canonical_document_id = $1 AND status = 'DUPLICATE'",
+                    doc_uuid,
+                )
+
+                # 3. Break self-referencing foreign keys on documents table
+                await conn.execute(
+                    "UPDATE documents SET canonical_document_id = NULL WHERE canonical_document_id = $1",
+                    doc_uuid,
+                )
+                await conn.execute(
+                    "UPDATE documents SET supersedes = NULL WHERE supersedes = $1",
+                    doc_uuid,
+                )
+
+                # 3. Explicitly delete from all child tables (safe even without ON DELETE CASCADE in DB)
+                await conn.execute(
+                    "DELETE FROM document_structure WHERE document_id = $1",
+                    doc_uuid,
+                )
+                await conn.execute(
+                    "DELETE FROM indexing_state WHERE document_id = $1",
+                    doc_uuid,
+                )
+                await conn.execute(
+                    """
+                    DELETE FROM pipeline_checkpoints
+                    WHERE job_id IN (SELECT job_id FROM ingestion_jobs WHERE document_id = $1)
+                    """,
+                    doc_uuid,
+                )
+                await conn.execute(
+                    "DELETE FROM ingestion_jobs WHERE document_id = $1",
+                    doc_uuid,
+                )
+                await conn.execute(
+                    "DELETE FROM chunks WHERE document_id = $1",
+                    doc_uuid,
+                )
+
+                # 4. Finally delete the document record itself
+                await conn.execute(
+                    "DELETE FROM documents WHERE id = $1",
+                    doc_uuid,
+                )
+                return True
 
     # ── Query helpers ──────────────────────────────────────────────────────────
 

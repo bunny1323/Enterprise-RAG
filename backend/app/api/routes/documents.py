@@ -212,9 +212,10 @@ async def delete_document(
 ) -> dict[str, Any]:
     """
     Completely delete a document:
-    1. Cascading delete from PostgreSQL (documents, chunks, jobs, document_structure)
+    1. Cascading delete from PostgreSQL (documents, chunks, jobs, checkpoints, document_structure, indexing_state)
     2. Purge from Weaviate vector database
     3. Purge from Neo4j knowledge graph
+    4. Purge uploaded raw file and extracted figure images from disk
     """
     try:
         doc_uuid = uuid.UUID(document_id)
@@ -224,33 +225,80 @@ async def delete_document(
             detail=f"Invalid document_id format: {document_id}",
         )
 
-    # 1. Delete from Weaviate
+    # 1. Fetch document to verify existence and retrieve storage_path & tenant
+    doc = await postgres.fetchrow(
+        "SELECT id, tenant_id, knowledge_base_id, storage_path, file_name FROM documents WHERE id = $1",
+        doc_uuid,
+    )
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document {document_id} not found",
+        )
+
+    # Multi-tenant check: enforce only if caller provided a non-default tenant
+    if tenant_ctx.tenant_id != "default" and doc["tenant_id"] != tenant_ctx.tenant_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: document belongs to a different tenant",
+        )
+
+    actual_tenant_id = doc["tenant_id"] or "default"
+
+    # 2. Delete from Weaviate vector database
     try:
-        weaviate_client = request.app.state.weaviate
-        weaviate_client.delete_by_document(document_id=document_id, tenant_id=tenant_ctx.tenant_id)
+        weaviate_client = getattr(request.app.state, "weaviate", None)
+        if weaviate_client:
+            weaviate_client.delete_by_document(document_id=document_id, tenant_id=actual_tenant_id)
     except Exception as e:
         logger.warning("documents.weaviate_delete_warning", error=str(e), document_id=document_id)
 
-    # 2. Delete from Neo4j
+    # 3. Delete from Neo4j knowledge graph
     try:
-        neo4j_client = request.app.state.neo4j
-        await neo4j_client.delete_document(document_id=document_id, tenant_id=tenant_ctx.tenant_id)
+        neo4j_client = getattr(request.app.state, "neo4j", None)
+        if neo4j_client:
+            await neo4j_client.delete_document(document_id=document_id, tenant_id=actual_tenant_id)
     except Exception as e:
         logger.warning("documents.neo4j_delete_warning", error=str(e), document_id=document_id)
 
-    # 3. Delete from PostgreSQL (cascades chunks, jobs, and document_structure)
-    deleted = await postgres.execute(
-        """
-        DELETE FROM documents
-        WHERE id = $1 AND tenant_id = $2 AND knowledge_base_id = $3
-        """,
-        doc_uuid,
-        tenant_ctx.tenant_id,
-        tenant_ctx.knowledge_base_id,
-    )
+    # 4. Clean up disk files (raw uploaded file and extracted figure images)
+    storage_path = doc.get("storage_path")
+    if storage_path:
+        try:
+            import os
+            if os.path.isfile(storage_path):
+                os.remove(storage_path)
+                logger.info("documents.storage_file_deleted", path=storage_path)
+        except Exception as e:
+            logger.warning("documents.storage_delete_warning", error=str(e), path=storage_path)
+
+        try:
+            from pathlib import Path
+            import shutil
+
+            settings = getattr(request.app.state, "settings", None)
+            if settings:
+                doc_stem = Path(storage_path).stem
+                if doc_stem:
+                    figures_dir = Path(settings.processed_storage_path) / "figures" / doc_stem
+                    if figures_dir.exists() and figures_dir.is_dir():
+                        shutil.rmtree(figures_dir, ignore_errors=True)
+                        logger.info("documents.figures_directory_deleted", path=str(figures_dir))
+        except Exception as e:
+            logger.warning("documents.figures_delete_warning", error=str(e))
+
+    # 5. Delete from PostgreSQL (safely handles FKs and all dependent tables)
+    deleted = await postgres.delete_document(doc_uuid)
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document {document_id} was not found or already deleted",
+        )
+
+    logger.info("documents.deleted_successfully", document_id=document_id, tenant=actual_tenant_id)
 
     return {
         "status": "deleted",
         "document_id": document_id,
-        "detail": "Purged from PostgreSQL, Weaviate, and Neo4j.",
+        "detail": "Purged from PostgreSQL, Weaviate, Neo4j, and local storage.",
     }

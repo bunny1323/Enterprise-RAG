@@ -1,12 +1,15 @@
 """
 Vision Provider Abstraction.
-Supports DisabledVisionProvider (safe for cloud/Render) and OllamaVisionProvider (for local ingestion).
+Supports:
+  - DisabledVisionProvider  — safe no-op for cloud/Render without API key
+  - GeminiVisionProvider    — primary cloud vision via Google Gemini
+Set VISION_PROVIDER=gemini in .env to use Gemini.
 """
 from abc import ABC, abstractmethod
 from typing import Any
 
 from app.config.logging import get_logger
-from app.services.vision.service import VisionService
+
 logger = get_logger(__name__)
 
 
@@ -17,7 +20,7 @@ class BaseVisionProvider(ABC):
     model_name: str = "n/a"
 
     @abstractmethod
-    def analyze_diagram(self, image_path: str) -> dict[str, Any]:
+    def analyze_diagram(self, image_path: str, timeout: float | None = None) -> dict[str, Any]:
         """
         Analyze a diagram image and return structured analysis dict.
         Must return a dict with keys:
@@ -35,14 +38,15 @@ class BaseVisionProvider(ABC):
 
 class DisabledVisionProvider(BaseVisionProvider):
     """
-    No-op vision provider used when vision analysis is disabled (e.g. Render 512MB RAM).
-    Returns empty analysis structure without failing. Images are still extracted and served.
+    No-op vision provider used when vision analysis is disabled.
+    Returns empty analysis structure without failing.
+    Images are still extracted and served via /api/v1/images/...
     """
 
     provider_name = "disabled"
     model_name = "disabled"
 
-    def analyze_diagram(self, image_path: str) -> dict[str, Any]:
+    def analyze_diagram(self, image_path: str, timeout: float | None = None) -> dict[str, Any]:
         logger.info(
             "vision.disabled.skip_analysis",
             provider=self.provider_name,
@@ -54,67 +58,65 @@ class DisabledVisionProvider(BaseVisionProvider):
             "components": [],
             "relationships": [],
             "spatial_layout": "Unknown",
-            "status": "skipped",
+            "status": "SKIPPED",
         }
 
     def close(self) -> None:
         pass
 
 
-class OllamaVisionProvider(BaseVisionProvider):
+class GeminiVisionProvider(BaseVisionProvider):
     """
-    Ollama-backed vision provider for local/dedicated ingestion environments.
-    Wraps existing VisionService.
+    Google Gemini cloud vision provider (primary production provider).
+
+    Delegates to app.services.vision.gemini_provider.GeminiVisionProvider
+    which handles the google-genai SDK details.
     """
 
-    provider_name = "ollama"
+    provider_name = "gemini"
 
-    def __init__(self, ollama_base_url: str, model: str = "qwen2.5vl:3b") -> None:
+    def __init__(self, api_key: str, model: str = "gemini-2.5-flash", timeout: float = 120.0) -> None:
+        from app.services.vision.gemini_provider import GeminiVisionProvider as _GeminiImpl
+        self._impl = _GeminiImpl(api_key=api_key, model=model, timeout=timeout)
         self.model_name = model
-        self._service = VisionService(ollama_base_url=ollama_base_url, model=model)
+        self.timeout = timeout
 
-    def analyze_diagram(self, image_path: str) -> dict[str, Any]:
-        logger.info(
-            "vision.ollama.figure_start",
-            provider=self.provider_name,
-            model=self.model_name,
-            image=image_path,
-        )
-        try:
-            result = self._service.analyze_diagram(image_path)
-            logger.info(
-                "vision.ollama.figure_analyzed",
-                provider=self.provider_name,
-                model=self.model_name,
-                image=image_path,
-                components=len(result.get("components", [])),
-            )
-            return result
-        except Exception as exc:
-            logger.error(
-                "vision.ollama.analysis_failed",
-                provider=self.provider_name,
-                model=self.model_name,
-                image=image_path,
-                error=str(exc),
-            )
-            raise
+    def analyze_diagram(self, image_path: str, timeout: float | None = None) -> dict[str, Any]:
+        return self._impl.analyze_diagram(image_path, timeout=timeout)
 
     def close(self) -> None:
-        self._service.close()
+        self._impl.close()
+
+
+
 
 
 def build_vision_provider(settings: Any) -> BaseVisionProvider:
-    """Factory to instantiate the appropriate VisionProvider based on configuration."""
+    """
+    Factory: instantiate the appropriate VisionProvider from configuration.
+
+    VISION_PROVIDER=gemini  → GeminiVisionProvider (primary, cloud-based)
+    VISION_PROVIDER=disabled → DisabledVisionProvider (no-op)
+    """
     provider_type = getattr(settings, "vision_provider", "disabled").lower().strip()
 
-    if provider_type == "ollama":
-        model = getattr(settings, "ollama_vision_model", "qwen2.5vl:3b")
-        logger.info("vision.provider_initialized", provider="ollama", model=model)
-        return OllamaVisionProvider(
-            ollama_base_url=settings.ollama_base_url,
-            model=model,
-        )
+    if provider_type == "gemini":
+        api_key = getattr(settings, "gemini_api_key", "") or ""
+        if not api_key:
+            logger.error(
+                "vision.gemini.missing_api_key",
+                hint="Set GEMINI_API_KEY in your .env file",
+            )
+            raise ValueError(
+                "GEMINI_API_KEY is required when VISION_PROVIDER=gemini. "
+                "Add it to your .env file."
+            )
+        model = getattr(settings, "gemini_vision_model", "gemini-2.5-flash")
+        timeout = getattr(settings, "vision_request_timeout", 120.0)
+        logger.info("vision.provider_initialized", provider="gemini", model=model)
+        return GeminiVisionProvider(api_key=api_key, model=model, timeout=timeout)
+
+
 
     logger.info("vision.provider_initialized", provider="disabled")
     return DisabledVisionProvider()

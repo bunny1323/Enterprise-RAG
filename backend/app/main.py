@@ -193,32 +193,51 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("startup.queue_worker_started")
 
     # ── 10. Start checkpointer ────────────────────────────────────────────────
-    checkpointer_cm = None
+    # Use AsyncConnectionPool so the checkpointer survives long idle periods.
+    # A bare from_conn_string single-connection is killed by Supabase's idle
+    # timeout (~5-10 min), causing "the connection is closed" on chat queries
+    # after any long ingestion run.
+    _checkpointer_pool = None
     try:
+        from psycopg_pool import AsyncConnectionPool
         from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-        checkpointer_cm = AsyncPostgresSaver.from_conn_string(settings.database_url)
+
+        _pool_conninfo = settings.database_url.replace("postgresql://", "postgresql://", 1)
+        _checkpointer_pool = AsyncConnectionPool(
+            conninfo=_pool_conninfo,
+            min_size=1,
+            max_size=3,
+            # keepalive options: detect dead connections before they are used
+            kwargs={
+                "options": "-c statement_timeout=30000",
+                "keepalives": 1,
+                "keepalives_idle": 30,
+                "keepalives_interval": 10,
+                "keepalives_count": 5,
+            },
+            open=False,
+        )
+        await _checkpointer_pool.open()
+        checkpointer = AsyncPostgresSaver(_checkpointer_pool)
+        await checkpointer.setup()
+        app.state.checkpointer = checkpointer
+        logger.info("startup.checkpointer_ready", backend="postgres_pool")
     except Exception as e:
-        logger.warning("startup.checkpointer_init_failed", error=str(e))
-
-    if checkpointer_cm:
+        logger.warning("startup.checkpointer_postgres_failed", error=str(e))
+        # Close pool if it was partially opened
+        if _checkpointer_pool is not None:
+            try:
+                await _checkpointer_pool.close()
+            except Exception:
+                pass
+        _checkpointer_pool = None
+        # Fallback to MemorySaver so conversational memory still works
         try:
-            async with checkpointer_cm as checkpointer:
-                await checkpointer.setup()
-                app.state.checkpointer = checkpointer
-                logger.info("startup.checkpointer_ready")
-                logger.info("startup.complete", app=settings.app_name, port=settings.port)
-                yield  # ── Application is running ────────────────────────────────────
-                return
-        except Exception as e:
-            logger.warning("startup.checkpointer_postgres_failed", error=str(e))
-
-    # Fallback to MemorySaver so conversational memory works reliably
-    try:
-        from langgraph.checkpoint.memory import MemorySaver
-        app.state.checkpointer = MemorySaver()
-        logger.info("startup.checkpointer_memory_ready")
-    except Exception:
-        app.state.checkpointer = None
+            from langgraph.checkpoint.memory import MemorySaver
+            app.state.checkpointer = MemorySaver()
+            logger.info("startup.checkpointer_memory_ready")
+        except Exception:
+            app.state.checkpointer = None
 
     logger.info("startup.complete", app=settings.app_name, port=settings.port)
     yield  # ── Application is running ────────────────────────────────────────
@@ -241,6 +260,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await opa_client.close()
     await llm_provider.close()
     vision_service.close()
+
+    # Close the checkpointer connection pool if it was created
+    if _checkpointer_pool is not None:
+        try:
+            await _checkpointer_pool.close()
+        except Exception:
+            pass
 
     logger.info("shutdown.complete")
 
