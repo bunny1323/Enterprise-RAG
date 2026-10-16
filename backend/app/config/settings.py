@@ -81,9 +81,14 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("VISION_REQUEST_TIMEOUT"),
     )
     vision_max_retries: int = Field(
-        default=1,
+        default=3,
         ge=0,
         validation_alias=AliasChoices("VISION_MAX_RETRIES"),
+    )
+    vision_min_request_interval: float = Field(
+        default=0.0,
+        ge=0.0,
+        validation_alias=AliasChoices("VISION_MIN_REQUEST_INTERVAL"),
     )
     vision_max_image_dimension: int = Field(
         default=1024,

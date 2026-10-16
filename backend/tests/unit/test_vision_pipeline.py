@@ -454,3 +454,33 @@ def test_downstream_chunking_contract(sample_image):
     assert "Hydraulic control circuit" in chunk.content
     assert "Pump" in chunk.content
 
+
+def test_is_transient_error_detection():
+    """Verify that Google 429 quota exhaustion and 503 unavailable are treated as transient."""
+    from app.pipelines.ingestion.steps.s04_vision import _is_transient_error
+
+    assert _is_transient_error(RuntimeError("429 RESOURCE_EXHAUSTED: quota exceeded"))
+    assert _is_transient_error(RuntimeError("503 UNAVAILABLE: high demand"))
+    assert _is_transient_error(RuntimeError("Please try again later. Rate limit reached."))
+    assert not _is_transient_error(ValueError("Invalid image format"))
+    assert not _is_transient_error(FileNotFoundError("Image not found"))
+
+
+def test_extract_retry_delay_google_retryinfo():
+    """Verify parsing of recommended wait times from error details and string representations."""
+    from app.pipelines.ingestion.steps.s04_vision import _extract_retry_delay
+
+    # From details dict
+    class MockErrorWithDetails(Exception):
+        details = [{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retry_delay": "36.5s"}]
+
+    assert _extract_retry_delay(MockErrorWithDetails()) == 36.5
+
+    # From error string
+    str_err = RuntimeError("429 RESOURCE_EXHAUSTED. Please retry in 35s.")
+    assert _extract_retry_delay(str_err) == 35.0
+
+    # From retry_delay string
+    str_err2 = RuntimeError("{'error': {'message': 'Rate limit', 'retry_delay': '37s'}}")
+    assert _extract_retry_delay(str_err2) == 37.0
+

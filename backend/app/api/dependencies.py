@@ -19,7 +19,7 @@ from app.services.embeddings.factory import build_embedding_provider
 from app.services.metadata.service import MetadataService
 from app.services.ocr.service import OCRService
 from app.services.storage.service import StorageService
-from app.services.vision.service import VisionService
+from app.services.vision.vision_provider import BaseVisionProvider, build_vision_provider
 
 
 from app.infrastructure.opa.client import OPAClient
@@ -123,12 +123,9 @@ def get_ocr_service() -> OCRService:
     return OCRService()
 
 
-def get_vision_service(settings: SettingsDep) -> VisionService:
-    """Return a stateless VisionService configured for local Ollama."""
-    return VisionService(
-        ollama_base_url=settings.ollama_base_url,
-        model=settings.ollama_vision_model,
-    )
+def get_vision_service(settings: SettingsDep) -> BaseVisionProvider:
+    """Return the configured vision provider (Gemini Cloud Vision or disabled)."""
+    return build_vision_provider(settings)
 
 
 def get_chunking_service() -> ChunkingService:

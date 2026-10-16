@@ -11,6 +11,8 @@ Analyzes technical diagrams and schematics with Qwen2.5-VL with:
 7. Preservation of original image_path (temporary preprocessing only)
 """
 import asyncio
+import random
+import re
 from collections import defaultdict
 from typing import Any
 
@@ -28,7 +30,7 @@ logger = get_logger(__name__)
 
 
 def _is_transient_error(exc: Exception) -> bool:
-    """Identify transient network/transport errors that warrant a retry."""
+    """Identify transient network/transport, quota (429), or server-side (503) errors that warrant a retry."""
     if isinstance(
         exc,
         (
@@ -41,8 +43,83 @@ def _is_transient_error(exc: Exception) -> bool:
     ):
         return True
     if isinstance(exc, httpx.HTTPStatusError):
-        return exc.response.status_code in {502, 503, 504}
+        return exc.response.status_code in {429, 500, 502, 503, 504}
+
+    # Inspect status code attributes (e.g. google.genai or google.api_core errors)
+    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    if code in {429, 500, 502, 503, 504}:
+        return True
+
+    # Check error message strings for rate limits and server availability
+    msg = str(exc).upper()
+    transient_indicators = (
+        "429",
+        "RESOURCE_EXHAUSTED",
+        "QUOTA",
+        "RATE LIMIT",
+        "503",
+        "UNAVAILABLE",
+        "HIGH DEMAND",
+        "SERVER OVERLOAD",
+        "TRY AGAIN LATER",
+        "TEMPORARILY UNAVAILABLE",
+    )
+    if any(ind in msg for ind in transient_indicators):
+        return True
+
     return False
+
+
+def _extract_retry_delay(exc: Exception) -> float | None:
+    """Extract recommended wait time from Google's RetryInfo / error details if present."""
+    # 1. Check structured details attribute
+    details = getattr(exc, "details", None) or getattr(exc, "error_details", None)
+    if isinstance(details, (list, tuple)):
+        for item in details:
+            if isinstance(item, dict):
+                delay_str = item.get("retry_delay")
+                if delay_str and isinstance(delay_str, str):
+                    clean = delay_str.rstrip("s").strip()
+                    try:
+                        return float(clean)
+                    except ValueError:
+                        pass
+    elif isinstance(details, dict):
+        delay_str = details.get("retry_delay")
+        if delay_str and isinstance(delay_str, str):
+            clean = delay_str.rstrip("s").strip()
+            try:
+                return float(clean)
+            except ValueError:
+                pass
+
+    # 2. Check response headers if present
+    response = getattr(exc, "response", None)
+    if response is not None:
+        headers = getattr(response, "headers", {})
+        retry_after = headers.get("retry-after") or headers.get("Retry-After")
+        if retry_after:
+            try:
+                return float(retry_after)
+            except ValueError:
+                pass
+
+    # 3. Regex match in string representation (e.g. "retry_delay": "36s" or "wait 35.4s")
+    msg = str(exc)
+    match = re.search(r"retry(?:_delay)?['\":\s]+([0-9]+(?:\.[0-9]+)?)s?", msg, re.IGNORECASE)
+    if match:
+        try:
+            return float(match.group(1))
+        except ValueError:
+            pass
+    match_wait = re.search(r"(?:wait|retry in|retry after)\s+([0-9]+(?:\.[0-9]+)?)\s*(?:s|sec|seconds)?", msg, re.IGNORECASE)
+    if match_wait:
+        try:
+            return float(match_wait.group(1))
+        except ValueError:
+            pass
+
+    return None
 
 
 async def step(state: IngestionState, services: dict[str, Any]) -> IngestionState:
@@ -203,6 +280,9 @@ async def step(state: IngestionState, services: dict[str, Any]) -> IngestionStat
     if candidates_to_process:
         semaphore = asyncio.Semaphore(max_concurrency)
         hash_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        min_interval: float = getattr(settings, "vision_min_request_interval", 0.0)
+        pacing_lock = asyncio.Lock()
+        last_request_time: list[float] = [0.0]
 
         async def process_candidate(fig: dict[str, Any], c_hash: str) -> None:
             nonlocal analyzed_figures, cached_figures, timeout_figures, failed_figures
@@ -223,7 +303,7 @@ async def step(state: IngestionState, services: dict[str, Any]) -> IngestionStat
 
                 # Acquire concurrency semaphore
                 async with semaphore:
-                    # Final check before calling Qwen
+                    # Final check before calling vision provider
                     cached = cache.get(c_hash, valid_models=valid_models if provider_name != "disabled" else None)
                     if cached is not None:
                         cached_figures += 1
@@ -236,6 +316,21 @@ async def step(state: IngestionState, services: dict[str, Any]) -> IngestionStat
                     # Execute vision inference with retry for transient errors, but NEVER retry timeout
                     for attempt in range(max_retries + 1):
                         try:
+                            # Pacing between requests (e.g. 12s on 5 RPM free tier to prevent 429 bursts)
+                            if min_interval > 0:
+                                async with pacing_lock:
+                                    now = loop.time()
+                                    elapsed = now - last_request_time[0]
+                                    if elapsed < min_interval:
+                                        wait_time = min_interval - elapsed
+                                        logger.info(
+                                            "step.vision.pacing_wait",
+                                            wait_seconds=round(wait_time, 2),
+                                            min_interval=min_interval,
+                                        )
+                                        await asyncio.sleep(wait_time)
+                                    last_request_time[0] = loop.time()
+
                             with preprocess_for_vision(orig_image_path, max_dimension=max_dim) as preprocessed_path:
                                 logger.info(
                                     "step.vision.analyze_start",
@@ -249,8 +344,7 @@ async def step(state: IngestionState, services: dict[str, Any]) -> IngestionStat
                                         vision.analyze_diagram,
                                         preprocessed_path,
                                     ),
-                                    # Timeout is handled internally by httpx requests per model (primary + fallback)
-                                    # We give a generous upper bound for safety.
+                                    # Timeout is handled internally by requests per model
                                     timeout=request_timeout + getattr(settings, "vision_fallback_timeout", 420.0) + 60.0,
                                 )
 
@@ -305,14 +399,29 @@ async def step(state: IngestionState, services: dict[str, Any]) -> IngestionStat
                         except Exception as exc:
                             is_transient = _is_transient_error(exc)
                             if is_transient and attempt < max_retries:
-                                logger.warning(
-                                    "step.vision.transient_retry",
-                                    image=orig_image_path,
-                                    attempt=attempt + 1,
-                                    max_retries=max_retries,
-                                    error=str(exc),
-                                )
-                                await asyncio.sleep(1.0)
+                                suggested_delay = _extract_retry_delay(exc)
+                                if suggested_delay is not None:
+                                    backoff_seconds = suggested_delay + random.uniform(1.0, 3.0)
+                                    logger.warning(
+                                        "step.vision.retryinfo_backoff",
+                                        image=orig_image_path,
+                                        attempt=attempt + 1,
+                                        max_retries=max_retries,
+                                        suggested_delay=suggested_delay,
+                                        waiting_seconds=round(backoff_seconds, 1),
+                                        reason="Google RetryInfo delay respected",
+                                    )
+                                else:
+                                    backoff_seconds = min(5.0 * (2 ** attempt) + random.uniform(0.5, 2.0), 60.0)
+                                    logger.warning(
+                                        "step.vision.transient_retry",
+                                        image=orig_image_path,
+                                        attempt=attempt + 1,
+                                        max_retries=max_retries,
+                                        waiting_seconds=round(backoff_seconds, 1),
+                                        error=str(exc),
+                                    )
+                                await asyncio.sleep(backoff_seconds)
                                 continue
 
                             # Non-transient or retries exhausted
@@ -336,15 +445,29 @@ async def step(state: IngestionState, services: dict[str, Any]) -> IngestionStat
 
         await asyncio.gather(*(process_candidate(f, h) for f, h in candidates_to_process))
 
+    candidate_count = len(candidates_to_process) + cached_figures
+    successful_count = analyzed_figures + cached_figures
+    coverage_pct = round((successful_count / max(candidate_count, 1)) * 100, 1)
+
+    manifest = {
+        "total_figures": total_figures,
+        "candidate_figures": candidate_count,
+        "analyzed_figures": analyzed_figures,
+        "cached_figures": cached_figures,
+        "skipped_figures": skipped_figures,
+        "timeout_figures": timeout_figures,
+        "failed_figures": failed_figures,
+        "coverage_percent": coverage_pct,
+        "provider": provider_name,
+        "model": model_name,
+    }
+    if state.parsed_doc is not None:
+        state.parsed_doc["vision_manifest"] = manifest
+
     logger.info(
         "step.vision.complete",
         document_id=str(state.document_id),
-        total=total_figures,
-        analyzed=analyzed_figures,
-        cached=cached_figures,
-        skipped=skipped_figures,
-        timeout=timeout_figures,
-        failed=failed_figures,
+        **manifest,
     )
 
     return state.model_copy(update={"parsed_doc": state.parsed_doc})

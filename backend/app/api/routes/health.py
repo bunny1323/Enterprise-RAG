@@ -25,6 +25,11 @@ async def liveness_check() -> dict[str, str]:
     summary="System health check",
     response_description="Service status for all dependencies",
 )
+@router.get(
+    "/api/v1/health",
+    summary="System health check (API v1 alias)",
+    response_description="Service status for all dependencies",
+)
 async def health_check(request: Request) -> dict:
     """
     Check connectivity to all external services.

@@ -286,9 +286,24 @@ def create_app() -> FastAPI:
     )
 
     # ── CORS ───────────────────────────────────────────────────────────────────
+    import os
+    allowed_origins = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "https://enterprise-rag-2u7l.onrender.com",
+    ]
+    custom_origins = os.getenv("CORS_ORIGINS", "")
+    if custom_origins:
+        for orig in custom_origins.split(","):
+            if orig.strip() and orig.strip() not in allowed_origins:
+                allowed_origins.append(orig.strip())
+
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=allowed_origins,
+        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
