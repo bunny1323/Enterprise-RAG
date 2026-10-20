@@ -1,42 +1,90 @@
 [
   {
+    "_comment": "===================================================================",
+    "_note": "IMPORTANT: All 'expected_document' values below are PLACEHOLDERS.",
+    "_action": "Replace them with filenames from your actual ingested corpus.",
+    "_how": "Upload documents via the /api/v1/documents endpoint, then update",
+    "_how2": "expected_document with the real filename before running evaluation.",
+    "===================================================================": true
+  },
+  {
+    "test_id": "GEN-001",
     "question": "What is the maximum operating pressure for the hydraulic pump assembly?",
-    "expected_document": "hydraulic_manual.pdf",
-    "expected_page": 14,
-    "expected_section": "3.2 Hydraulic Pump Specifications",
-    "expected_evidence": "maximum operating pressure 350 bar",
-    "expected_answer": "The maximum operating pressure is 350 bar."
+    "expected_document": "PLACEHOLDER_hydraulic_manual.pdf",
+    "expected_page": null,
+    "expected_section": null,
+    "expected_evidence": "maximum operating pressure",
+    "expected_answer": "The maximum operating pressure is specified in the hydraulic pump specification section.",
+    "category": "SPECIFICATION",
+    "difficulty": "basic",
+    "query_variants": [
+      "What is the max hydraulic pump pressure?",
+      "hydraulic pump max psi",
+      "pump pressure limit specification"
+    ]
   },
   {
+    "test_id": "GEN-002",
     "question": "What safety precautions must be observed when handling the chemical solvent?",
-    "expected_document": "chemical_safety_sds.pdf",
-    "expected_page": 3,
-    "expected_section": "Section 7: Handling and Storage",
+    "expected_document": "PLACEHOLDER_chemical_safety_sds.pdf",
+    "expected_page": null,
+    "expected_section": null,
     "expected_evidence": "avoid contact with skin and eyes",
-    "expected_answer": "Wear appropriate PPE. Avoid contact with skin, eyes, and clothing. Ensure adequate ventilation."
+    "expected_answer": "Wear appropriate PPE. Avoid contact with skin, eyes, and clothing. Ensure adequate ventilation.",
+    "category": "PROCEDURE",
+    "difficulty": "basic",
+    "query_variants": [
+      "chemical solvent safety rules",
+      "How to safely handle solvent?",
+      "solvent handling precautions PPE"
+    ]
   },
   {
+    "test_id": "GEN-003",
     "question": "What are the recommended maintenance intervals for the gear reducer?",
-    "expected_document": "maintenance_guide.pdf",
-    "expected_page": 22,
-    "expected_section": "Preventive Maintenance Schedule",
+    "expected_document": "PLACEHOLDER_maintenance_guide.pdf",
+    "expected_page": null,
+    "expected_section": null,
     "expected_evidence": "oil change every 2000 hours",
-    "expected_answer": "Gear reducer oil should be changed every 2000 operating hours."
+    "expected_answer": "Gear reducer oil should be changed every 2000 operating hours.",
+    "category": "MAINTENANCE",
+    "difficulty": "basic",
+    "query_variants": [
+      "gear reducer oil change interval",
+      "How often should gear reducer oil be changed?",
+      "maintainance intervals gear reducer"
+    ]
   },
   {
+    "test_id": "GEN-004",
     "question": "Which torque specification applies to the M12 fasteners in the assembly?",
-    "expected_document": "torque_specifications.pdf",
-    "expected_page": 8,
-    "expected_section": "Fastener Torque Table",
+    "expected_document": "PLACEHOLDER_torque_specifications.pdf",
+    "expected_page": null,
+    "expected_section": null,
     "expected_evidence": "M12 fastener 85 Nm",
-    "expected_answer": "M12 fasteners require 85 Nm of torque."
+    "expected_answer": "M12 fasteners require 85 Nm of torque.",
+    "category": "SPECIFICATION",
+    "difficulty": "basic",
+    "query_variants": [
+      "M12 bolt torque Nm",
+      "torque for M12 bolts",
+      "M12 fastner torque spec"
+    ]
   },
   {
+    "test_id": "GEN-005",
     "question": "What does the alarm code E-404 indicate?",
-    "expected_document": "alarm_codes_manual.pdf",
-    "expected_page": 45,
-    "expected_section": "Fault Codes",
+    "expected_document": "PLACEHOLDER_alarm_codes_manual.pdf",
+    "expected_page": null,
+    "expected_section": null,
     "expected_evidence": "E-404 motor overcurrent fault",
-    "expected_answer": "Alarm E-404 indicates a motor overcurrent fault."
+    "expected_answer": "Alarm E-404 indicates a motor overcurrent fault.",
+    "category": "ERROR_CODE",
+    "difficulty": "basic",
+    "query_variants": [
+      "E404 alarm meaning",
+      "What is error E-404?",
+      "alarm code E 404"
+    ]
   }
 ]

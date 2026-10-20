@@ -140,31 +140,92 @@ def _build_retrieval_query(clean_query: str) -> str:
     for pattern, canonical in _UNIT_ALIAS_PATTERNS:
         text = pattern.sub(canonical, text)
 
-    # Step 2: token-level safe singularization
+    # Step 2: Technical abbreviations expansion table
+    abbrev_map = {
+        "temp": "temperature",
+        "spec": "specification",
+        "specs": "specifications",
+        "cyl": "cylinder",
+        "cyls": "cylinders",
+        "press": "pressure",
+        "hyd": "hydraulic",
+        "hydr": "hydraulic",
+        "maint": "maintenance",
+        "elec": "electrical",
+        "mech": "mechatronics",
+        "std": "standard",
+        "diag": "diagram",
+    }
+
+    # Step 3: Domain synonyms mapping (bidirectional terminology bridges)
+    domain_synonyms = [
+        (re.compile(r'\bhydraulic\s+fluids?\b', re.IGNORECASE), "hydraulic oil"),
+        (re.compile(r'\bfault\s+codes?\b', re.IGNORECASE), "error code alarm code"),
+        (re.compile(r'\balarm\s+codes?\b', re.IGNORECASE), "error code fault code"),
+        (re.compile(r'\boverheating\b', re.IGNORECASE), "overheat high temperature excessive temperature"),
+        (re.compile(r'\boverheated\b', re.IGNORECASE), "overheat high temperature excessive temperature"),
+        (re.compile(r'\btroubleshooting\b', re.IGNORECASE), "fault diagnosis troubleshooting"),
+        (re.compile(r'\bmaintenance\s+intervals?\b', re.IGNORECASE), "service interval periodic inspection"),
+        (re.compile(r'\bspare\s+parts?\b', re.IGNORECASE), "replacement component parts"),
+    ]
+
+    extra_domain_terms = []
+    lowered_input = clean_query.lower()
+    for syn_pattern, syn_replacement in domain_synonyms:
+        if syn_pattern.search(lowered_input):
+            extra_domain_terms.append(syn_replacement)
+
+    # Step 4: Token-level safe singularization and abbreviation expansion
     tokens = text.split()
-    tokens = [_safe_singularize_token(t) for t in tokens]
-    
-    # Step 3: Append only the new/changed tokens to the original query (Query Expansion)
-    # This ensures BM25 can match documents that contain a mix of original and normalized forms.
+    expanded_tokens = []
+    for t in tokens:
+        clean_t = t.lower().strip("?,.")
+        if clean_t in abbrev_map:
+            expanded_tokens.append(abbrev_map[clean_t])
+        expanded_tokens.append(_safe_singularize_token(t))
+
+    # Step 5: Technical identifier variants (hyphen removal, hyphen insertion, OCR O/0)
+    id_variants = []
+    for t in tokens:
+        # e.g., E-104 -> E104
+        if "-" in t and len(t) >= 3:
+            unhyphenated = t.replace("-", "")
+            if re.match(r'^[A-Za-z0-9]+$', unhyphenated):
+                id_variants.append(unhyphenated)
+        # e.g., E104 -> E-104
+        m = re.match(r'^([A-Za-z]{1,4})(\d{2,}[A-Za-z0-9]*)$', t)
+        if m:
+            id_variants.append(f"{m.group(1)}-{m.group(2)}")
+            # OCR zero vs O letter variation: E042 <-> EO42
+            if "0" in m.group(2):
+                id_variants.append(f"{m.group(1)}-{m.group(2).replace('0', 'O')}")
+                id_variants.append(f"{m.group(1)}{m.group(2).replace('0', 'O')}")
+            elif "O" in m.group(2).upper():
+                id_variants.append(f"{m.group(1)}-{m.group(2).upper().replace('O', '0')}")
+                id_variants.append(f"{m.group(1)}{m.group(2).upper().replace('O', '0')}")
+
+    # Step 6: Append only new/changed tokens to original query (Query Expansion)
     original_tokens_lower = set(clean_query.lower().split())
     new_tokens = []
-    for t in tokens:
-        if t.lower() not in original_tokens_lower:
-            new_tokens.append(t)
-            
+    for t in [*expanded_tokens, *extra_domain_terms, *id_variants]:
+        for sub_t in t.split():
+            sub_clean = sub_t.lower().strip("?,.")
+            if sub_clean and sub_clean not in original_tokens_lower:
+                new_tokens.append(sub_clean)
+                original_tokens_lower.add(sub_clean)
+
     if not new_tokens:
         expanded = clean_query
     else:
         expanded = clean_query + " " + " ".join(new_tokens)
 
-    lowered = clean_query.lower()
-    if "symbol" in lowered or "caution" in lowered:
+    if "symbol" in lowered_input or "caution" in lowered_input:
         symbol_terms = (
             "symbol safety precautions internal pressure technical precautions "
             "preserving standards"
         )
         expanded = f"{expanded} {symbol_terms}"
-        
+
     return expanded
 
 
@@ -200,6 +261,28 @@ class QueryNormalizationService:
 
         # Entity regex (e.g. part numbers, fault codes like E-104, P2001)
         entities = re.findall(r"\b[A-Z0-9]{2,10}-[0-9]{2,6}\b|\b[EFP]\d{3,5}\b", clean)
+
+        # ── 0. GREETING / CONVERSATIONAL ──────────────────────────────────────
+        stripped_punct = re.sub(r"[^\w\s]", "", lowered).strip()
+        is_greeting = (
+            stripped_punct in {
+                "hi", "hello", "hey", "hola", "greetings", "good morning", "good afternoon",
+                "good evening", "howdy", "who are you", "what are you", "what can you do",
+                "help", "thanks", "thank you", "bye", "goodbye", "ping"
+            }
+            or bool(re.match(r"^(hi|hello|hey)\s+(there|assistant|bot|team|all)?$", stripped_punct))
+        )
+        if is_greeting:
+            return NormalizedQuery(
+                raw_query=query,
+                clean_query=clean,
+                retrieval_query=retrieval_q,
+                typo_query=typo_q,
+                intent="GREETING",
+                secondary_intent="CONVERSATIONAL",
+                extracted_entities=[],
+                answer_type="conversational",
+            )
 
         # ── 1. COUNT_QUERY (e.g., "how many major sections...", "how many chapters...") ──
         count_match = re.search(r"\bhow\s+many\s+(major\s+)?(sections?|chapters?|items?|parts?)\b", lowered)

@@ -88,7 +88,23 @@ class RetrievalAgent:
                 tenant=ctx.tenant_id,
             )
 
-            # ── 0. STRUCTURAL RETRIEVAL FAST-PATH ─────────────────────────────
+            # ── 0. GREETING FAST-PATH ─────────────────────────────────────────
+            if intent == "GREETING":
+                return query_state.model_copy(
+                    update={
+                        "intent": intent,
+                        "dense_results": [],
+                        "bm25_results": [],
+                        "graph_results": [],
+                        "fused_results": [],
+                        "reranked_results": [],
+                        "confidence_level": "HIGH",
+                        "confidence_score": 1.0,
+                        "strategy_used": "conversational",
+                    }
+                )
+
+            # ── 1. STRUCTURAL RETRIEVAL FAST-PATH ─────────────────────────────
             # For COUNT_QUERY and LIST_QUERY (e.g., "How many major sections...",
             # "What are the major sections?"), query the canonical document_structure index.
             if self._structure_svc:

@@ -29,12 +29,34 @@ class GoldenEntry:
     expected_section: str | None = None
     expected_evidence: str = ""     # key passage that must appear in context
     expected_answer: str = ""       # canonical answer text
+    test_id: str | None = None
+    category: str | None = None
+    difficulty: str | None = None
+    query_variants: list[str] = field(default_factory=list)
 
 
 def load_golden_dataset(path: str | Path) -> list[GoldenEntry]:
-    """Load golden entries from a JSON file."""
+    """Load golden entries from a JSON file, ignoring comment blocks and extra fields."""
     data = json.loads(Path(path).read_text(encoding="utf-8"))
-    return [GoldenEntry(**item) for item in data]
+    entries: list[GoldenEntry] = []
+    for item in data:
+        if not isinstance(item, dict) or "question" not in item:
+            continue
+        entries.append(
+            GoldenEntry(
+                question=item["question"],
+                expected_document=item.get("expected_document", ""),
+                expected_page=item.get("expected_page"),
+                expected_section=item.get("expected_section"),
+                expected_evidence=item.get("expected_evidence", ""),
+                expected_answer=item.get("expected_answer", ""),
+                test_id=item.get("test_id"),
+                category=item.get("category"),
+                difficulty=item.get("difficulty"),
+                query_variants=item.get("query_variants", []),
+            )
+        )
+    return entries
 
 
 # ── Retrieval Metrics ────────────────────────────────────────────────────────────

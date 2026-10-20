@@ -111,7 +111,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("GEMINI_API_KEY"),
     )
     gemini_vision_model: str = Field(
-        default="gemini-3.8-flash",
+        default="gemini-2.5-flash",
         validation_alias=AliasChoices("GEMINI_VISION_MODEL"),
     )
 
@@ -122,7 +122,7 @@ class Settings(BaseSettings):
 
     # Generation LLM. Groq is Primary, Ollama is Fallback.
     llm_provider: str = Field(default="groq")
-    llm_model: str = Field(default="qwen/qwen3.8-27b", validation_alias=AliasChoices("LLM_MODEL", "GROQ_MODEL"))
+    llm_model: str = Field(default="llama-3.3-70b-versatile", validation_alias=AliasChoices("LLM_MODEL", "GROQ_MODEL"))
     llm_base_url: str = Field(default="", validation_alias=AliasChoices("LLM_BASE_URL", "GROQ_BASE_URL"))
     llm_api_key: str = Field(
         default="",
@@ -183,6 +183,88 @@ class Settings(BaseSettings):
         """Fall back to localhost Redis ONLY during local development (debug=True)."""
         if not self.redis_url and self.debug:
             self.redis_url = "redis://localhost:6379"
+        return self
+
+    @model_validator(mode="after")
+    def validate_startup_config(self) -> "Settings":
+        """
+        Startup configuration validation.
+
+        Detects placeholder values, known-bad model IDs, and missing required
+        credentials.  Raises ValueError with an actionable message so the process
+        fails fast instead of silently degrading at runtime.
+
+        Critical checks raise ValueError (process will not start).
+        Warning checks log instead of raising.
+        """
+        import logging
+        _log = logging.getLogger(__name__)
+
+        # ── 1. Placeholder detection ──────────────────────────────────────────
+        _PLACEHOLDER_TOKENS = (
+            "<placeholder>", "<your-", "<password>", "<host>", "<port>",
+            "<redis_password>", "<redis_host>", "<redis_port>",
+            "your-key-here", "changeme",
+        )
+
+        def _has_placeholder(value: str) -> bool:
+            v = value.lower()
+            return any(tok in v for tok in _PLACEHOLDER_TOKENS)
+
+        if self.redis_url and _has_placeholder(self.redis_url):
+            _log.warning(
+                "startup.config_warning: REDIS_URL contains placeholder text — "
+                "semantic cache disabled until a real URL is provided."
+            )
+            self.redis_url = ""  # treat as unconfigured
+
+        # ── 2. Known-bad Gemini vision model names ────────────────────────────
+        _KNOWN_BAD_VISION_MODELS = {
+            "gemini-3.8-flash",   # never existed
+            "gemini-3-flash",
+            "gemini-3.0-flash",
+        }
+        if (
+            getattr(self, "vision_provider", "disabled") == "gemini"
+            and self.gemini_vision_model in _KNOWN_BAD_VISION_MODELS
+        ):
+            raise ValueError(
+                f"GEMINI_VISION_MODEL={self.gemini_vision_model!r} is not a valid "
+                "Google AI model ID.  Supported models include: "
+                "gemini-2.5-flash, gemini-1.5-flash, gemini-1.5-pro.  "
+                "Update GEMINI_VISION_MODEL in your .env file."
+            )
+
+        # ── 3. Known-bad LLM model names ──────────────────────────────────────
+        _KNOWN_BAD_LLM_MODELS = {
+            "qwen/qwen3.8-27b",   # invalid Groq model ID
+            "qwen3.8-27b",
+            "qwen/qwen3.8",
+        }
+        if self.llm_provider == "groq" and self.llm_model in _KNOWN_BAD_LLM_MODELS:
+            raise ValueError(
+                f"LLM_MODEL={self.llm_model!r} is not a valid Groq model ID.  "
+                "Valid Groq models include: llama-3.3-70b-versatile, "
+                "llama-3.1-8b-instant, gemma2-9b-it.  "
+                "Update LLM_MODEL in your .env file.  "
+                "List all available models: curl -H 'Authorization: Bearer $GROQ_API_KEY' "
+                "https://api.groq.com/openai/v1/models"
+            )
+
+        # ── 4. Missing Groq API key when provider=groq ────────────────────────
+        if self.llm_provider == "groq" and not self.llm_api_key:
+            _log.warning(
+                "startup.config_warning: GROQ_API_KEY is empty — "
+                "Groq generation will fail; Ollama fallback will be attempted."
+            )
+
+        # ── 5. Missing Gemini API key when vision=gemini ──────────────────────
+        if getattr(self, "vision_provider", "disabled") == "gemini" and not self.gemini_api_key:
+            raise ValueError(
+                "GEMINI_API_KEY is required when VISION_PROVIDER=gemini. "
+                "Add GEMINI_API_KEY to your .env file."
+            )
+
         return self
 
     @property

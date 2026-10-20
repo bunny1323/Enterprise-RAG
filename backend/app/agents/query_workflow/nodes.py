@@ -172,6 +172,19 @@ class QueryNodes:
             if state.get("cache_hit") or state.get("error_message"):
                 return state
 
+            if state.get("intent") == "GREETING":
+                state["evidence_coverage"] = "COMPLETE"
+                state["answerable"] = True
+                state["retrieval_trace"] = {
+                    "intent": "GREETING",
+                    "retrieval_strategy": "conversational",
+                    "evidence_count": 0,
+                    "evidence_coverage": "COMPLETE",
+                    "answerable": True,
+                    "reason": "Direct conversational greeting.",
+                }
+                return state
+
             norm = self._normalizer.normalize(state["query"])
             evidence = state.get("reranked_results", [])
             coverage_result = self._coverage_svc.evaluate_coverage(norm, evidence)
@@ -215,6 +228,20 @@ class QueryNodes:
     async def generate_response(self, state: QueryWorkflowState) -> QueryWorkflowState:
         """Generate response via LLM with complexity-based model routing."""
         with tracer.start_as_current_span("QueryNodes.generate_response") as span:
+            if state.get("intent") == "GREETING":
+                span.set_attribute("conversational_greeting", True)
+                state["answer"] = (
+                    "Hello! I am your Enterprise Document Intelligence Assistant. "
+                    "How can I assist you today? You can ask me questions about your uploaded documents, "
+                    "technical procedures, specifications, troubleshooting, or diagrams."
+                )
+                state["citations"] = []
+                state["sources"] = []
+                state["confidence_level"] = "HIGH"
+                state["confidence_score"] = 1.0
+                state["verification_status"] = "SUPPORTED"
+                return state
+
             # If answerability gate already set answer due to insufficient evidence, skip LLM
             if state.get("answerable") is False and state.get("answer"):
                 span.set_attribute("gated_insufficient_evidence", True)
@@ -249,6 +276,11 @@ class QueryNodes:
     async def verify_citations(self, state: QueryWorkflowState) -> QueryWorkflowState:
         """Map citations and verify groundedness."""
         with tracer.start_as_current_span("QueryNodes.verify_citations") as span:
+            if state.get("intent") == "GREETING":
+                state["citations"] = []
+                state["sources"] = []
+                state["verification_status"] = "SUPPORTED"
+                return state
             evidence = state.get("reranked_results", [])
             if not evidence or not state.get("answer"):
                 span.set_attribute("skipped", True)

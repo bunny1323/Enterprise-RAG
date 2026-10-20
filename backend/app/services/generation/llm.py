@@ -350,12 +350,17 @@ class OpenAICompatibleProvider(LLMProvider):
             },
         )
 
-    # Priority list of production chat models on Groq (verified against live /models)
+    # Priority list of production chat models on Groq (verified against live /models, Oct 2026).
+    # llama-3.3-70b-versatile is the recommended general-purpose model.
     PREFERRED_MODELS = [
-        "qwen/qwen3.8-27b",
+        "llama-3.3-70b-versatile",
+        "llama-3.1-70b-versatile",
+        "llama-3.1-8b-instant",
+        "gemma2-9b-it",
+        "mixtral-8x7b-32768",
+        "qwen/qwen3.8-27b",         # kept for backward compatibility if available
         "openai/gpt-oss-20b",
         "groq/compound-mini",
-        "qwen/qwen3.6-27b",
     ]
 
     # Non-conversational models that should never be selected as general chat models
@@ -408,7 +413,7 @@ class OpenAICompatibleProvider(LLMProvider):
             lowered = m.lower()
             if "llama" in lowered and not any(bad in lowered for bad in self.EXCLUDED_PATTERNS):
                 return m
-        return available[0] if available else "qwen/qwen3.8-27b"
+        return available[0] if available else "llama-3.3-70b-versatile"
 
     async def generate(
         self,
@@ -626,7 +631,7 @@ class GroqLLMProvider(OpenAICompatibleProvider):
     def __init__(
         self,
         api_key: str,
-        model: str = "qwen/qwen3.8-27b",
+        model: str = "llama-3.3-70b-versatile",
         base_url: str = "https://api.groq.com/openai/v1",
         timeout: float = 30.0,
         temperature: float = 0.2,
@@ -636,7 +641,7 @@ class GroqLLMProvider(OpenAICompatibleProvider):
         super().__init__(
             base_url=clean_url,
             api_key=api_key,
-            model=model or "qwen/qwen3.8-27b",
+            model=model or "llama-3.3-70b-versatile",
             provider_name="groq",
             timeout=timeout,
             temperature=temperature,
@@ -747,7 +752,7 @@ def build_llm_provider(
     if normalized == "groq":
         groq_provider = GroqLLMProvider(
             api_key=api_key,
-            model=model or "qwen/qwen3.8-27b",
+            model=model or "llama-3.3-70b-versatile",
             base_url=base_url or "https://api.groq.com/openai/v1",
             timeout=timeout,
             temperature=temperature,
