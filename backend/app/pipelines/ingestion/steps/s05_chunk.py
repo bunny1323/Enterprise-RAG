@@ -43,6 +43,21 @@ async def step(state: IngestionState, services: dict[str, Any]) -> IngestionStat
         filename=state.filename,
     )
 
+    # Optional PII Detection and Redaction Hook
+    pii_detector = services.get("pii_detector")
+    if pii_detector is not None:
+        pii_count = 0
+        for chunk in chunks:
+            if chunk.content:
+                res = pii_detector.detect_and_redact(chunk.content)
+                if res.contains_pii:
+                    chunk.content = res.redacted_text
+                    chunk.metadata["pii_redacted"] = True
+                    chunk.metadata["pii_types"] = res.detected_types
+                    pii_count += 1
+        if pii_count > 0:
+            logger.info("step.chunk.pii_redacted", document_id=str(state.document_id), redacted_chunks=pii_count)
+
     # Categorize chunks for logging
     from app.models.chunk import ChunkType
 

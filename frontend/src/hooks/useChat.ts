@@ -86,6 +86,7 @@ export function useChat() {
               hallucinationStatus: data.hallucination_status,
               latencyMs: data.latency_ms,
               queryId: data.query_id,
+              images: data.images,
               isStreaming: false,
             });
             setIsLoading(false);

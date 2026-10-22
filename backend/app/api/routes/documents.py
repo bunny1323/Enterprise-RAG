@@ -68,6 +68,18 @@ async def upload_document(
             industry=industry,
         )
         return result
+    except ValueError as val_err:
+        logger.error("upload.rejected", error=str(val_err), filename=file.filename)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(val_err),
+        ) from val_err
+    except IOError as io_err:
+        logger.error("upload.storage_io_error", error=str(io_err), filename=file.filename)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Storage write error: {str(io_err)}",
+        ) from io_err
     except Exception as err:
         logger.error("upload.failed", error=str(err), filename=file.filename)
         raise HTTPException(
@@ -236,14 +248,22 @@ async def delete_document(
             detail=f"Document {document_id} not found",
         )
 
-    # Multi-tenant check: enforce only if caller provided a non-default tenant
-    if tenant_ctx.tenant_id != "default" and doc["tenant_id"] != tenant_ctx.tenant_id:
+    # Multi-tenant check: caller must own document unless caller is a verified administrator
+    is_admin = tenant_ctx.claims.get("is_admin", False)
+    doc_tenant_id = doc.get("tenant_id") or "default"
+    if doc_tenant_id != tenant_ctx.tenant_id and not is_admin:
+        logger.warning(
+            "security.cross_tenant_delete_prevented",
+            document_id=document_id,
+            doc_tenant=doc_tenant_id,
+            caller_tenant=tenant_ctx.tenant_id,
+        )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Forbidden: document belongs to a different tenant",
         )
 
-    actual_tenant_id = doc["tenant_id"] or "default"
+    actual_tenant_id = doc_tenant_id
 
     # 2. Delete from Weaviate vector database
     try:

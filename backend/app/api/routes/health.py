@@ -13,6 +13,7 @@ router = APIRouter(tags=["health"])
 
 
 @router.get("/health/live", summary="Process liveness check")
+@router.get("/api/v1/health/live", summary="Process liveness check (API v1 alias)")
 async def liveness_check() -> dict[str, str]:
     """Return success whenever the FastAPI process is serving requests."""
     return {"status": "alive"}
@@ -130,7 +131,22 @@ async def health_check(request: Request) -> dict:
                 logger.info("health.vision_gemini_unreachable", error=str(err))
         services["ollama"] = "not_required"
 
-
+    # ── Redis (Cache & Rate Limiting) ──────────────────────────────────────────
+    if settings and settings.redis_url:
+        try:
+            redis_client = getattr(request.app.state, "redis", None)
+            if redis_client and redis_client.is_connected():
+                raw_redis = getattr(redis_client, "_client", None)
+                if raw_redis:
+                    await raw_redis.ping()
+                services["redis"] = "ok"
+            else:
+                services["redis"] = "degraded: not connected"
+        except Exception as err:
+            services["redis"] = f"error: {str(err)}"
+            logger.warning("health.redis_failed", error=str(err))
+    else:
+        services["redis"] = "disabled"
 
     return {
         "status": "healthy" if overall_healthy else "degraded",
@@ -139,6 +155,7 @@ async def health_check(request: Request) -> dict:
 
 
 @router.get("/health/ready", summary="Dependency readiness check")
+@router.get("/api/v1/health/ready", summary="Dependency readiness check (API v1 alias)")
 async def readiness_check(request: Request) -> JSONResponse:
     """Return 503 when a required runtime dependency cannot be used."""
     payload = await health_check(request)

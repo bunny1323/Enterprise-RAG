@@ -20,13 +20,18 @@ class StorageClient:
         processed_path: str,
         chunks_path: str,
     ) -> None:
-        self._raw = Path(raw_path)
-        self._processed = Path(processed_path)
-        self._chunks = Path(chunks_path)
+        self._raw = Path(raw_path).resolve()
+        self._processed = Path(processed_path).resolve()
+        self._chunks = Path(chunks_path).resolve()
 
         # Ensure directories exist at initialization time
         for directory in (self._raw, self._processed, self._chunks):
             directory.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def raw_dir(self) -> Path:
+        """Return the authoritative raw storage directory."""
+        return self._raw
 
     # ── Upload storage ─────────────────────────────────────────────────────────
 
@@ -35,14 +40,22 @@ class StorageClient:
         Save raw uploaded file bytes to the raw storage directory.
 
         A UUID prefix is prepended to prevent filename collisions.
+        Guarantees that the file is verified on disk before returning the path.
 
         Args:
             file_bytes: Binary content of the uploaded file.
             filename: Original filename (used as suffix).
 
         Returns:
-            Absolute path string to the saved file.
+            Absolute canonical path string to the saved file.
+
+        Raises:
+            ValueError: If file_bytes is empty or filename is invalid.
+            IOError: If disk write or post-write verification fails.
         """
+        if not file_bytes:
+            raise ValueError("Uploaded file content is empty (0 bytes)")
+
         # Path traversal protection
         filename = Path(filename).name
         if not filename:
@@ -50,14 +63,46 @@ class StorageClient:
 
         safe_name = f"{uuid.uuid4().hex}_{filename}"
         dest = (self._raw / safe_name).resolve()
-        
+
         # Verify it stays within the raw directory
-        if not str(dest).startswith(str(self._raw.resolve())):
+        if not dest.is_relative_to(self._raw):
             raise ValueError("Path traversal detected")
 
+        # Ensure destination directory exists immediately before writing
+        dest.parent.mkdir(parents=True, exist_ok=True)
+
         dest.write_bytes(file_bytes)
-        logger.info("storage.upload_saved", path=str(dest), size=len(file_bytes))
+
+        # Immediate verification that the file was written completely
+        if not dest.is_file():
+            raise IOError(f"Storage write failed: file does not exist at {dest}")
+
+        actual_size = dest.stat().st_size
+        if actual_size != len(file_bytes):
+            raise IOError(
+                f"Storage write mismatch: expected {len(file_bytes)} bytes, wrote {actual_size}"
+            )
+
+        logger.info("storage.upload_saved", path=str(dest), size_bytes=actual_size)
         return str(dest)
+
+    def get_raw_path(self, storage_path_or_filename: str) -> Path:
+        """
+        Resolve a storage path or filename against the authoritative raw storage directory.
+
+        If the path is already an existing file, returns its canonical Path.
+        If an absolute path from a previous container or environment is given but missing,
+        checks if the basename exists within the authoritative raw directory.
+        """
+        p = Path(storage_path_or_filename)
+        if p.is_file():
+            return p.resolve()
+
+        candidate = (self._raw / p.name).resolve()
+        if candidate.is_file():
+            return candidate
+
+        return p.resolve() if p.is_absolute() else candidate
 
     # ── Processed storage ──────────────────────────────────────────────────────
 

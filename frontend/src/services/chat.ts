@@ -57,10 +57,20 @@ export async function streamChatCompletion(
   let response: Response;
   const url = `${API_BASE_URL}${CHAT_PATH}`;
 
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+
+  // Reuse the authentication token from sessionStorage (consistent with Axios interceptor in api.ts)
+  const token = typeof sessionStorage !== "undefined" ? sessionStorage.getItem("erag_token") : null;
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+
   try {
     response = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({
         query: request.query,
         top_k: request.top_k ?? 10,
@@ -74,6 +84,20 @@ export async function streamChatCompletion(
       new Error(
         "Backend unavailable. Please verify that the Enterprise-RAG backend is running."
       )
+    );
+    return;
+  }
+
+  if (response.status === 401) {
+    handlers.onError?.(
+      new Error("Authentication required or session expired. Please sign in again.")
+    );
+    return;
+  }
+
+  if (response.status === 403) {
+    handlers.onError?.(
+      new Error("Access forbidden: you do not have permission to query this resource.")
     );
     return;
   }

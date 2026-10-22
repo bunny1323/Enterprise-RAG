@@ -47,6 +47,7 @@ export interface Message {
   reasoningStatus?: string[];
   isStreaming?: boolean;
   error?: string;
+  images?: ChatResponse["images"];
 }
 
 export interface Conversation {

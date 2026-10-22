@@ -20,6 +20,10 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = Field(default="EnterpriseRAG")
+    app_env: str = Field(
+        default="development",
+        validation_alias=AliasChoices("APP_ENV", "ENVIRONMENT", "ENV"),
+    )
     debug: bool = Field(default=False)
     port: int = Field(default=8000)
 
@@ -38,6 +42,36 @@ class Settings(BaseSettings):
     # Redis (Render Key Value in prod; localhost fallback only in local dev)
     redis_url: str = Field(default="")
     cache_ttl_seconds: int = Field(default=3600)
+
+    # Security & Access Controls
+    api_key_auth_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("API_KEY_AUTH_ENABLED", "AUTH_ENABLED"),
+    )
+    api_auth_token: str = Field(
+        default="",
+        validation_alias=AliasChoices("API_AUTH_TOKEN", "API_KEY"),
+    )
+    admin_api_token: str = Field(
+        default="",
+        validation_alias=AliasChoices("ADMIN_API_TOKEN", "ADMIN_KEY"),
+    )
+    api_tokens_json: str = Field(
+        default="",
+        validation_alias=AliasChoices("API_TOKENS_MAPPING", "API_TOKENS_JSON"),
+    )
+    default_tenant_id: str = Field(
+        default="default",
+        validation_alias=AliasChoices("DEFAULT_TENANT_ID"),
+    )
+    trusted_proxies: list[str] = Field(
+        default_factory=lambda: ["127.0.0.1", "::1"],
+        validation_alias=AliasChoices("TRUSTED_PROXIES"),
+    )
+    pii_detection_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("PII_DETECTION_ENABLED"),
+    )
 
     # Ingestion Controls
     max_upload_size_mb: int = Field(default=100)
@@ -111,7 +145,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("GEMINI_API_KEY"),
     )
     gemini_vision_model: str = Field(
-        default="gemini-2.5-flash",
+        default="gemini-3.8-flash",
         validation_alias=AliasChoices("GEMINI_VISION_MODEL"),
     )
 
@@ -146,8 +180,9 @@ class Settings(BaseSettings):
     )
     @classmethod
     def ensure_paths_exist(cls, v: str) -> str:
-        Path(v).mkdir(parents=True, exist_ok=True)
-        return v
+        resolved = str(Path(v).resolve())
+        Path(resolved).mkdir(parents=True, exist_ok=True)
+        return resolved
 
     @field_validator("debug", mode="before")
     @classmethod
@@ -185,13 +220,23 @@ class Settings(BaseSettings):
             self.redis_url = "redis://localhost:6379"
         return self
 
+    @property
+    def is_production(self) -> bool:
+        """Return True if running in production mode."""
+        env = (self.app_env or "").strip().lower()
+        if env in {"production", "prod", "release", "staging"}:
+            return True
+        if not self.debug and env not in {"development", "dev", "test", "testing", "local"}:
+            return True
+        return False
+
     @model_validator(mode="after")
     def validate_startup_config(self) -> "Settings":
         """
         Startup configuration validation.
 
         Detects placeholder values, known-bad model IDs, and missing required
-        credentials.  Raises ValueError with an actionable message so the process
+        credentials. Raises ValueError with an actionable message so the process
         fails fast instead of silently degrading at runtime.
 
         Critical checks raise ValueError (process will not start).
@@ -200,7 +245,7 @@ class Settings(BaseSettings):
         import logging
         _log = logging.getLogger(__name__)
 
-        # ── 1. Placeholder detection ──────────────────────────────────────────
+        # ── 0. Production Security Enforcement ────────────────────────────────
         _PLACEHOLDER_TOKENS = (
             "<placeholder>", "<your-", "<password>", "<host>", "<port>",
             "<redis_password>", "<redis_host>", "<redis_port>",
@@ -211,6 +256,24 @@ class Settings(BaseSettings):
             v = value.lower()
             return any(tok in v for tok in _PLACEHOLDER_TOKENS)
 
+        if self.is_production:
+            if not self.api_key_auth_enabled:
+                raise ValueError(
+                    f"Production configuration error: API_KEY_AUTH_ENABLED must be set to 'true' "
+                    f"in production mode (APP_ENV={self.app_env!r})."
+                )
+            if not self.api_auth_token and not self.admin_api_token and not self.api_tokens_json:
+                raise ValueError(
+                    "Production configuration error: API_AUTH_TOKEN, ADMIN_API_TOKEN, or API_TOKENS_MAPPING "
+                    "must be configured when authentication is enabled in production mode."
+                )
+            if self.api_auth_token and _has_placeholder(self.api_auth_token):
+                raise ValueError("Production configuration error: API_AUTH_TOKEN contains placeholder text.")
+            if self.admin_api_token and _has_placeholder(self.admin_api_token):
+                raise ValueError("Production configuration error: ADMIN_API_TOKEN contains placeholder text.")
+
+        # ── 1. Placeholder detection ──────────────────────────────────────────
+
         if self.redis_url and _has_placeholder(self.redis_url):
             _log.warning(
                 "startup.config_warning: REDIS_URL contains placeholder text — "
@@ -220,7 +283,6 @@ class Settings(BaseSettings):
 
         # ── 2. Known-bad Gemini vision model names ────────────────────────────
         _KNOWN_BAD_VISION_MODELS = {
-            "gemini-3.8-flash",   # never existed
             "gemini-3-flash",
             "gemini-3.0-flash",
         }

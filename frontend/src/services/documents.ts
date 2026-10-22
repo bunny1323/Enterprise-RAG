@@ -83,3 +83,14 @@ export async function getDocuments(): Promise<DocumentRecord[]> {
     throw toApiError(err);
   }
 }
+
+export async function deleteDocument(documentId: string): Promise<{ status: string; document_id: string }> {
+  try {
+    const res = await api.delete<{ status: string; document_id: string }>(
+      `${DOCUMENTS_PATH}/${documentId}`
+    );
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}

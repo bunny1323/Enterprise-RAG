@@ -10,7 +10,7 @@ from typing import AsyncIterator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import documents, health, jobs, query
+from app.api.routes import documents, health, images, jobs, query
 from app.config.logging import configure_logging, get_logger
 from app.config.settings import get_settings
 from app.infrastructure.neo4j.client import Neo4jClient
@@ -27,6 +27,7 @@ from app.services.embeddings.factory import build_embedding_provider
 from app.services.generation.llm import build_llm_provider
 from app.services.metadata.service import MetadataService
 from app.services.ocr.service import OCRService
+from app.services.pii.interface import SimpleRegexPIIDetector
 from app.services.storage.service import StorageService
 from app.services.vision.vision_provider import build_vision_provider
 from app.config.opentelemetry import setup_telemetry
@@ -39,6 +40,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     Everything before `yield` runs at startup; everything after at shutdown.
     """
     settings = get_settings(reload=True)
+    settings.validate_startup_config()
     app.state.settings = settings
     configure_logging(debug=settings.debug)
     logger = get_logger(__name__)
@@ -176,6 +178,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         "chunker": chunker_service,
         "metadata": metadata_service,
         "embedder": embedding_service,
+        "pii_detector": SimpleRegexPIIDetector(),
     }
 
     pipeline = IngestionPipeline(services=services_registry)
@@ -317,18 +320,13 @@ def create_app() -> FastAPI:
     # ── Routers ────────────────────────────────────────────────────────────────
     app.include_router(health.router)
     app.include_router(documents.router)
+    app.include_router(images.router)
     app.include_router(jobs.router)
     app.include_router(query.router)
 
-    # ── Static Images ──────────────────────────────────────────────────────────
-    from fastapi.staticfiles import StaticFiles
+    # Ensure storage paths exist
     import os
     os.makedirs(settings.processed_storage_path, exist_ok=True)
-    app.mount(
-        "/api/v1/images",
-        StaticFiles(directory=settings.processed_storage_path),
-        name="images"
-    )
 
     return app
 

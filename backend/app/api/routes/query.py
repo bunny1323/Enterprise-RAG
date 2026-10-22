@@ -159,9 +159,17 @@ async def chat_query(
         embedder=embedder,
     )
 
-    # 3. Initialize workflow state
+    # 3. Initialize workflow state with PII redaction if enabled
+    query_text = body.query
+    if getattr(settings, "pii_detection_enabled", True):
+        from app.services.pii.interface import SimpleRegexPIIDetector
+        pii_res = SimpleRegexPIIDetector().detect_and_redact(query_text)
+        if pii_res.contains_pii:
+            logger.info("query.pii_redacted", detected=pii_res.detected_types, trace_id=trace_id)
+            query_text = pii_res.redacted_text
+
     initial_state = QueryWorkflowState(
-        query=body.query,
+        query=query_text,
         tenant_context=tenant_ctx,
         top_k=body.top_k,
         intent="",

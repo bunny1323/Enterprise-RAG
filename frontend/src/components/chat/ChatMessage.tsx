@@ -1,4 +1,5 @@
 import type { Citation, Message } from "../../types/chat";
+import { API_BASE_URL } from "../../services/api";
 import { ConfidenceBadge } from "./ConfidenceBadge";
 import { GroundingBadge } from "./GroundingBadge";
 import { CitationCard } from "./CitationCard";
@@ -78,6 +79,36 @@ export function ChatMessage({ message, onOpenCitation }: ChatMessageProps) {
                           onOpen={onOpenCitation}
                         />
                       ))}
+                    </div>
+                  </div>
+                )}
+
+                {message.images && message.images.length > 0 && (
+                  <div>
+                    <p className="text-xs font-medium text-ink-soft mb-2">
+                      Extracted Diagrams & Figures
+                    </p>
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      {message.images.map((img, i) => {
+                        const token = typeof sessionStorage !== "undefined" ? sessionStorage.getItem("erag_token") : null;
+                        const fullUrl = `${API_BASE_URL}${img.url}${token ? `?token=${encodeURIComponent(token)}` : ""}`;
+                        return (
+                          <div key={i} className="rounded border border-line bg-surface p-2 space-y-1.5">
+                            <img
+                              src={fullUrl}
+                              alt={img.caption || `Extracted diagram page ${img.page}`}
+                              className="max-h-48 w-full object-contain rounded bg-black/5"
+                              loading="lazy"
+                            />
+                            {img.caption && (
+                              <p className="text-xs text-ink-soft line-clamp-2">{img.caption}</p>
+                            )}
+                            <p className="text-[10px] text-ink-faint">
+                              {img.source ? `${img.source} • ` : ""}Page {img.page}
+                            </p>
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 )}

@@ -89,10 +89,16 @@ class OPAClient:
         except Exception as err:
             logger.warning("opa.unreachable_fallback_used", error=str(err))
 
-        # Safe fallback based on context access_level (default-deny for RESTRICTED if unauthenticated)
-        if ctx.access_level == "RESTRICTED":
+        # Safe fallback based on verified context claims (default-deny for RESTRICTED if unauthenticated)
+        is_verified_admin = bool(
+            ctx.claims.get("is_admin") is True
+            or ctx.claims.get("role") == "admin"
+            or ctx.claims.get("verified_admin") is True
+        )
+
+        if ctx.access_level == "RESTRICTED" and is_verified_admin:
             permitted_levels = ["PUBLIC", "INTERNAL", "RESTRICTED"]
-        elif ctx.access_level == "INTERNAL":
+        elif ctx.access_level in ("INTERNAL", "RESTRICTED"):
             permitted_levels = ["PUBLIC", "INTERNAL"]
         else:
             permitted_levels = ["PUBLIC"]

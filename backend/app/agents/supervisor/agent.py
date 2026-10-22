@@ -79,9 +79,34 @@ class IngestionSupervisor:
 
         # Read file bytes from multipart stream
         file_bytes = await file.read()
+        if not file_bytes:
+            raise ValueError(f"Uploaded file '{file.filename}' is empty (0 bytes)")
 
-        # Save to raw storage (synchronous path op, fast)
+        # Enforce file-size limits before writing to disk
+        from app.config.settings import get_settings
+        settings = get_settings()
+        max_bytes = settings.max_upload_size_mb * 1024 * 1024
+        if len(file_bytes) > max_bytes:
+            raise ValueError(
+                f"Uploaded file '{file.filename}' ({len(file_bytes) / (1024 * 1024):.1f} MB) "
+                f"exceeds maximum allowed upload limit of {settings.max_upload_size_mb} MB"
+            )
+
+        # Save to raw storage (synchronous path op with verified write)
         storage_path = self._storage.save_upload(file_bytes, file.filename or "upload.pdf")
+
+        # Explicit verification that the file is physically present and readable
+        saved_file = Path(storage_path)
+        if not saved_file.is_file():
+            raise IOError(f"Could not verify saved upload on disk at {storage_path}")
+
+        logger.info(
+            "supervisor.upload_saved",
+            filename=file.filename,
+            storage_path=storage_path,
+            size_bytes=len(file_bytes),
+            tenant_id=tenant_id,
+        )
 
         # INSERT document record immediately
         doc_row = await self._postgres.fetchrow(
@@ -142,6 +167,8 @@ class IngestionSupervisor:
             "supervisor.upload_complete",
             document_id=str(document_id),
             job_id=str(job_id),
+            storage_path=storage_path,
+            size_bytes=len(file_bytes),
             queued=self._queue.qsize(),
         )
 
@@ -172,6 +199,55 @@ class IngestionSupervisor:
                 """
             )
             for doc in pending_docs:
+                raw_path = doc.get("storage_path", "")
+                resolved_path = None
+
+                # Check if the file actually exists on this container's filesystem
+                if raw_path and Path(raw_path).is_file():
+                    resolved_path = str(Path(raw_path).resolve())
+                elif raw_path:
+                    # Attempt recovery via authoritative raw directory
+                    candidate = self._storage.get_raw_path(raw_path)
+                    if candidate.is_file():
+                        resolved_path = str(candidate.resolve())
+
+                # If file is missing (e.g. ephemeral container restart on Render)
+                if not resolved_path:
+                    logger.error(
+                        "supervisor.recovered_file_missing",
+                        document_id=str(doc["id"]),
+                        storage_path=raw_path,
+                        filename=doc["file_name"],
+                    )
+                    from datetime import datetime, timezone
+                    now = datetime.now(timezone.utc)
+                    err_msg = (
+                        f"File not found on storage disk at '{raw_path}'. "
+                        "On Render, files stored on the default ephemeral filesystem do not survive restarts or redeployments. "
+                        "To prevent this, attach a Render Persistent Disk (set RAW_STORAGE_PATH=/data/raw) or re-upload the document."
+                    )
+                    await self._postgres.execute(
+                        """
+                        UPDATE documents
+                        SET status = 'FAILED', error_message = $1, completed_at = $2
+                        WHERE id = $3
+                        """,
+                        err_msg,
+                        now,
+                        doc["id"],
+                    )
+                    await self._postgres.execute(
+                        """
+                        UPDATE ingestion_jobs
+                        SET status = 'FAILED', error_message = $1, completed_at = $2
+                        WHERE document_id = $3
+                        """,
+                        err_msg,
+                        now,
+                        doc["id"],
+                    )
+                    continue
+
                 job_row = await self._postgres.fetchrow(
                     "SELECT job_id FROM ingestion_jobs WHERE document_id = $1 ORDER BY started_at DESC LIMIT 1",
                     doc["id"]
@@ -185,7 +261,7 @@ class IngestionSupervisor:
                         knowledge_base_id=doc["knowledge_base_id"],
                         filename=doc["file_name"],
                         industry=doc["industry"],
-                        storage_path=doc["storage_path"],
+                        storage_path=resolved_path,
                         status=DocumentStatus.PENDING,
                     )
                     await self._queue.put(state)

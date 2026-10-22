@@ -33,16 +33,40 @@ async def step(state: IngestionState, services: dict[str, Any]) -> IngestionStat
     Raises:
         ValueError: If any validation check fails.
     """
-    logger.info("step.validate.start", document_id=str(state.document_id))
+    logger.info(
+        "step.validate.start",
+        document_id=str(state.document_id),
+        storage_path=state.storage_path,
+        filename=state.filename,
+    )
 
     path = Path(state.storage_path)
 
-    # ── Check file existence ───────────────────────────────────────────────────
-    if not path.exists():
-        raise ValueError(f"File not found at storage path: {state.storage_path}")
+    # ── Check file existence & resolve via storage service if shifted ─────────
+    if not path.is_file():
+        storage_svc = services.get("storage")
+        if storage_svc and hasattr(storage_svc, "get_raw_path"):
+            candidate = storage_svc.get_raw_path(state.storage_path)
+            if candidate.is_file():
+                logger.info(
+                    "step.validate.path_resolved_via_storage",
+                    original=state.storage_path,
+                    resolved=str(candidate),
+                )
+                path = candidate
+                state = state.model_copy(update={"storage_path": str(path)})
+
+    if not path.is_file():
+        raise ValueError(
+            f"File not found at storage path: '{state.storage_path}'. "
+            "Ensure the file exists, is readable, and persistent storage is configured if running on Render."
+        )
 
     # ── Check file size ────────────────────────────────────────────────────────
     file_size = path.stat().st_size
+    if file_size == 0:
+        raise ValueError(f"Uploaded file '{state.filename}' is empty (0 bytes)")
+
     if file_size > _MAX_FILE_SIZE_BYTES:
         raise ValueError(
             f"File size {file_size / 1024 / 1024:.1f} MB exceeds 100 MB limit"
@@ -59,6 +83,8 @@ async def step(state: IngestionState, services: dict[str, Any]) -> IngestionStat
     logger.info(
         "step.validate.complete",
         document_id=str(state.document_id),
+        storage_path=str(path),
+        size_bytes=file_size,
         size_mb=round(file_size / 1024 / 1024, 2),
         mime=mime_type,
     )

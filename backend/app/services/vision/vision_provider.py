@@ -75,7 +75,7 @@ class GeminiVisionProvider(BaseVisionProvider):
 
     provider_name = "gemini"
 
-    def __init__(self, api_key: str, model: str = "gemini-2.5-flash", timeout: float = 120.0) -> None:
+    def __init__(self, api_key: str, model: str = "gemini-3.8-flash", timeout: float = 120.0) -> None:
         from app.services.vision.gemini_provider import GeminiVisionProvider as _GeminiImpl
         self._impl = _GeminiImpl(api_key=api_key, model=model, timeout=timeout)
         self.model_name = model
@@ -111,7 +111,7 @@ def build_vision_provider(settings: Any) -> BaseVisionProvider:
                 "GEMINI_API_KEY is required when VISION_PROVIDER=gemini. "
                 "Add it to your .env file."
             )
-        model = getattr(settings, "gemini_vision_model", "gemini-2.5-flash")
+        model = getattr(settings, "gemini_vision_model", "gemini-3.8-flash")
         timeout = getattr(settings, "vision_request_timeout", 120.0)
         logger.info("vision.provider_initialized", provider="gemini", model=model)
         return GeminiVisionProvider(api_key=api_key, model=model, timeout=timeout)

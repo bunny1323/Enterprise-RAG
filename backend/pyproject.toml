@@ -44,6 +44,7 @@ dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
     "pytest-cov>=5.0.0",
+    "pytest-timeout>=2.3.0",
     "ruff>=0.6.0",
     "mypy>=1.11.0",
 ]
@@ -68,6 +69,7 @@ dev-dependencies = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
     "pytest-cov>=5.0.0",
+    "pytest-timeout>=2.3.0",
     "ruff>=0.6.0",
     "mypy>=1.11.0",
 ]
@@ -79,6 +81,15 @@ packages = ["app"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
+timeout = 120
+markers = [
+    "integration: marks tests that require live external services (deselect with -m 'not integration')",
+    "slow: marks tests with long runtimes (deselect with -m 'not slow')",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]
 
 [tool.ruff]
 line-length = 100

@@ -128,7 +128,7 @@ _GOOD_PAYLOAD = {
 def _make_provider(fake_genai_modules):
     """Instantiate GeminiVisionProvider with the injected fake SDK."""
     from app.services.vision.gemini_provider import GeminiVisionProvider
-    return GeminiVisionProvider(api_key="test-key", model="gemini-2.5-flash")
+    return GeminiVisionProvider(api_key="test-key", model="gemini-3.8-flash")
 
 
 # ── 1. Provider creation ──────────────────────────────────────────────────────
@@ -137,14 +137,14 @@ class TestGeminiProviderCreation:
     def test_created_with_valid_key(self, inject_fake_genai):
         fake_google, fake_genai, mock_client = inject_fake_genai
         provider = _make_provider(inject_fake_genai)
-        assert provider.model_name == "gemini-2.5-flash"
+        assert provider.model_name == "gemini-3.8-flash"
         assert provider.provider_name == "gemini"
         fake_genai.Client.assert_called_with(api_key="test-key")
 
     def test_raises_on_missing_api_key(self, inject_fake_genai):
         import app.services.vision.gemini_provider as gmod
         with pytest.raises(ValueError, match="GEMINI_API_KEY"):
-            gmod.GeminiVisionProvider(api_key="", model="gemini-2.5-flash")
+            gmod.GeminiVisionProvider(api_key="", model="gemini-3.8-flash")
 
     def test_factory_builds_gemini_provider(self, inject_fake_genai):
         """build_vision_provider returns GeminiVisionProvider when VISION_PROVIDER=gemini."""
@@ -153,7 +153,7 @@ class TestGeminiProviderCreation:
         settings = MagicMock()
         settings.vision_provider = "gemini"
         settings.gemini_api_key = "test-key"
-        settings.gemini_vision_model = "gemini-2.5-flash"
+        settings.gemini_vision_model = "gemini-3.8-flash"
         settings.vision_request_timeout = 120.0
 
         provider = build_vision_provider(settings)
@@ -197,7 +197,7 @@ class TestGeminiResponseParsing:
         assert result["components"] == _GOOD_PAYLOAD["components"]
         assert len(result["relationships"]) == 2
         assert result["relationships"][0]["from"] == "Pump"
-        assert result["model_used"] == "gemini-2.5-flash"
+        assert result["model_used"] == "gemini-3.8-flash"
         assert result["prompt_version"] == "v2"
         assert result["status"] == "ok"
 
@@ -312,7 +312,7 @@ async def test_s04_uses_gemini_provider(tmp_path, monkeypatch):
 
     mock_provider = MagicMock()
     mock_provider.provider_name = "gemini"
-    mock_provider.model_name = "gemini-2.5-flash"
+    mock_provider.model_name = "gemini-3.8-flash"
     mock_provider.fallback_model = None
     mock_provider.analyze_diagram.return_value = {
         "functional_summary": "Pump schematic",
@@ -320,7 +320,7 @@ async def test_s04_uses_gemini_provider(tmp_path, monkeypatch):
         "relationships": [{"from": "Pump", "to": "Valve", "type": "FEEDS"}],
         "spatial_layout": "Left to right",
         "status": "ok",
-        "model_used": "gemini-2.5-flash",
+        "model_used": "gemini-3.8-flash",
     }
 
     state = IngestionState(

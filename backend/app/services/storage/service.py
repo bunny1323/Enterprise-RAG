@@ -34,3 +34,7 @@ class StorageService:
     def load_processed(self, document_id: str) -> dict:
         """Load a saved processed document JSON."""
         return self._client.load_processed(document_id)
+
+    def get_raw_path(self, storage_path_or_filename: str):
+        """Resolve a storage path or filename to an authoritative Path."""
+        return self._client.get_raw_path(storage_path_or_filename)
