@@ -540,25 +540,25 @@ class PostgresClient:
             raise RuntimeError("PostgresClient.init_pool() must be called first")
         return self._pool
 
-    async def execute(self, query: str, *args: Any) -> str:
+    async def execute(self, query: str, *args: Any, timeout: float = 25.0) -> str:
         """Execute a write query (INSERT / UPDATE / DELETE / DDL). Returns status string."""
         async with self.pool.acquire() as conn:
-            result: str = await conn.execute(query, *args)
+            result: str = await conn.execute(query, *args, timeout=timeout)
             return result
 
-    async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
+    async def fetch(self, query: str, *args: Any, timeout: float = 25.0) -> list[dict[str, Any]]:
         """Execute a SELECT and return all rows as plain dicts."""
         async with self.pool.acquire() as conn:
-            rows: list[Record] = await conn.fetch(query, *args)
+            rows: list[Record] = await conn.fetch(query, *args, timeout=timeout)
             return [dict(row) for row in rows]
 
-    async def fetchrow(self, query: str, *args: Any) -> dict[str, Any] | None:
+    async def fetchrow(self, query: str, *args: Any, timeout: float = 25.0) -> dict[str, Any] | None:
         """Execute a SELECT and return the first row as a plain dict, or None."""
         async with self.pool.acquire() as conn:
-            row: Record | None = await conn.fetchrow(query, *args)
+            row: Record | None = await conn.fetchrow(query, *args, timeout=timeout)
             return dict(row) if row else None
 
-    async def fetchval(self, query: str, *args: Any) -> Any:
+    async def fetchval(self, query: str, *args: Any, timeout: float = 25.0) -> Any:
         """Execute a SELECT and return the first column of the first row."""
         async with self.pool.acquire() as conn:
-            return await conn.fetchval(query, *args)
+            return await conn.fetchval(query, *args, timeout=timeout)

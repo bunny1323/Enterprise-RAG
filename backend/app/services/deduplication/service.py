@@ -120,15 +120,26 @@ class DeduplicationService:
             return [], [c.chunk_id for c in chunks]
 
         # Find existing chunk_ids that match these content_hashes under tenant_id
-        rows = await postgres.fetch(
-            """
-            SELECT chunk_id, content_hash
-            FROM chunks
-            WHERE content_hash = ANY($1::text[]) AND tenant_id = $2
-            """,
-            hashes,
-            tenant_id,
-        )
+        try:
+            rows = await postgres.fetch(
+                """
+                SELECT chunk_id, content_hash
+                FROM chunks
+                WHERE content_hash = ANY($1::text[]) AND tenant_id = $2
+                """,
+                hashes,
+                tenant_id,
+            )
+        except Exception as err:
+            # On DB timeout or error, treat all chunks as new (safe fallback).
+            # They will be embedded and indexed fresh — no data loss.
+            logger.warning(
+                "dedup.partition_chunks_db_error",
+                error=str(err),
+                total_chunks=len(chunks),
+                action="treating_all_as_new",
+            )
+            return [], [c.chunk_id for c in chunks]
 
         existing_hashes = {r["content_hash"] for r in rows}
 
@@ -148,6 +159,7 @@ class DeduplicationService:
             new=len(new_ids),
         )
         return reusable_ids, new_ids
+
 
     # ── Level 4: MinHash / LSH Near-Duplicate Candidate Detection ──────────────
 
