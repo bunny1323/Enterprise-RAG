@@ -46,14 +46,20 @@ class EmbeddingCache:
         }
         keys = list(keys_map.keys())
 
-        rows = await postgres.fetch(
-            """
-            SELECT cache_key, vector
-            FROM embedding_cache
-            WHERE cache_key = ANY($1::text[])
-            """,
-            keys,
-        )
+        try:
+            rows = await postgres.fetch(
+                """
+                SELECT cache_key, vector
+                FROM embedding_cache
+                WHERE cache_key = ANY($1::text[])
+                """,
+                keys,
+            )
+        except Exception as err:
+            # Cache is best-effort — a failure here just means a cache miss, not
+            # a fatal pipeline error.
+            logger.warning("embed_cache.get_batch_failed", error=str(err))
+            return {}
 
         hits: dict[str, list[float]] = {}
         for row in rows:
@@ -81,23 +87,38 @@ class EmbeddingCache:
         model: str,
         model_version: str,
     ) -> None:
-        """Store newly computed embeddings into PostgreSQL cache."""
+        """Store newly computed embeddings into PostgreSQL cache in a single batch."""
         if not hash_vector_map:
             return
 
-        for ch, vector in hash_vector_map.items():
-            cache_key = make_cache_key(ch, model, model_version)
-            await postgres.execute(
-                """
-                INSERT INTO embedding_cache (cache_key, content_hash, embedding_model, embedding_model_version, vector, created_at)
-                VALUES ($1, $2, $3, $4, $5, NOW())
-                ON CONFLICT (cache_key) DO NOTHING
-                """,
-                cache_key,
+        # Build all rows first, then insert with a single executemany() call.
+        # This replaces the N-round-trip loop (one INSERT per chunk) that was
+        # causing the 600s embed step timeout on large documents.
+        rows = [
+            (
+                make_cache_key(ch, model, model_version),
                 ch,
                 model,
                 model_version,
                 json.dumps(vector),
             )
+            for ch, vector in hash_vector_map.items()
+        ]
 
-        logger.info("embed_cache.set_batch", stored=len(hash_vector_map))
+        try:
+            async with postgres.pool.acquire() as conn:
+                await conn.executemany(
+                    """
+                    INSERT INTO embedding_cache
+                        (cache_key, content_hash, embedding_model, embedding_model_version, vector, created_at)
+                    VALUES ($1, $2, $3, $4, $5, NOW())
+                    ON CONFLICT (cache_key) DO NOTHING
+                    """,
+                    rows,
+                )
+            logger.info("embed_cache.set_batch", stored=len(rows))
+        except Exception as err:
+            # Cache writes are best-effort — ingestion must not fail because the
+            # cache table is temporarily unavailable or a connection is dropped.
+            logger.warning("embed_cache.set_batch_failed", error=str(err), count=len(rows))
+

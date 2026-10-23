@@ -6,6 +6,7 @@ Returns document_id in <100ms by deferring all heavy processing to the backgroun
 import asyncio
 import traceback
 import uuid
+from pathlib import Path
 from uuid import UUID
 
 from fastapi import UploadFile
