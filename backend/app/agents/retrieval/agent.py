@@ -93,6 +93,7 @@ class RetrievalAgent:
                 return query_state.model_copy(
                     update={
                         "intent": intent,
+                        "intent_confidence": norm.intent_confidence,
                         "dense_results": [],
                         "bm25_results": [],
                         "graph_results": [],
@@ -133,6 +134,7 @@ class RetrievalAgent:
                     return query_state.model_copy(
                         update={
                             "intent": intent,
+                            "intent_confidence": norm.intent_confidence,
                             "fused_results": evidence,
                             "reranked_results": evidence,
                             "confidence_level": "HIGH",
@@ -150,6 +152,7 @@ class RetrievalAgent:
                         return query_state.model_copy(
                             update={
                                 "intent": intent,
+                                "intent_confidence": norm.intent_confidence,
                                 "fused_results": sections,
                                 "reranked_results": sections,
                                 "confidence_level": "HIGH",
@@ -159,7 +162,7 @@ class RetrievalAgent:
                         )
 
                 elif intent == "PAGE_NUMBER_FORMAT":
-                    notation = norm.extracted_notation or "2-3"
+                    notation = norm.extracted_notation
                     pf_results = await self._structure_svc.lookup_page_format(
                         notation=notation,
                         tenant_id=ctx.tenant_id,
@@ -169,6 +172,7 @@ class RetrievalAgent:
                         return query_state.model_copy(
                             update={
                                 "intent": intent,
+                                "intent_confidence": norm.intent_confidence,
                                 "fused_results": pf_results,
                                 "reranked_results": pf_results,
                                 "confidence_level": "HIGH",
@@ -493,6 +497,7 @@ class RetrievalAgent:
             return query_state.model_copy(
                 update={
                     "intent": intent,
+                    "intent_confidence": norm.intent_confidence,
                     "dense_results": dense_results,
                     "bm25_results": bm25_results,
                     "graph_results": graph_results,

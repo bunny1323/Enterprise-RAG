@@ -12,6 +12,7 @@ class QueryState(BaseModel):
     tenant_context: TenantContext
     top_k: int = 10
     intent: str = "FACTUAL"
+    intent_confidence: float = 1.0
     dense_results: list[SearchResult] = Field(default_factory=list)
     bm25_results: list[SearchResult] = Field(default_factory=list)
     graph_results: list[SearchResult] = Field(default_factory=list)

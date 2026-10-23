@@ -16,6 +16,7 @@ class QueryWorkflowState(TypedDict):
     
     # Internal state
     intent: str
+    intent_confidence: float
     permitted_access_levels: list[str]
     cache_hit: bool
     retrieval_strategy: str

@@ -138,6 +138,7 @@ class QueryNodes:
             )
 
             state["intent"] = result.intent
+            state["intent_confidence"] = getattr(result, "intent_confidence", 0.95)
             state["dense_results"] = result.dense_results
             state["bm25_results"] = result.bm25_results
             state["graph_results"] = result.graph_results
@@ -189,6 +190,9 @@ class QueryNodes:
             evidence = state.get("reranked_results", [])
             coverage_result = self._coverage_svc.evaluate_coverage(norm, evidence)
 
+            from app.services.generation.llm import get_context_summary
+            ctx_summary = get_context_summary(evidence)
+
             state["evidence_coverage"] = coverage_result.coverage_status
             state["answerable"] = coverage_result.answerable
             state["retrieval_trace"] = {
@@ -202,6 +206,7 @@ class QueryNodes:
                 "relationship_supported": coverage_result.relationship_supported,
                 "inferred_only": coverage_result.inferred_only,
                 "reason": coverage_result.reason,
+                **ctx_summary,
             }
 
             span.set_attribute("evidence_coverage", coverage_result.coverage_status)
@@ -258,7 +263,7 @@ class QueryNodes:
                 return state
 
             from app.services.generation.llm import get_intent_system_instruction
-            sys_inst = get_intent_system_instruction(state.get("intent"))
+            sys_inst = get_intent_system_instruction(state.get("intent"), query=state.get("query"))
 
             gen_result = await self._llm.generate(
                 prompt=state["query"],

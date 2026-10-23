@@ -53,11 +53,12 @@ class EvidenceCoverageService:
 
         # ── 1. COUNT_QUERY Coverage ──────────────────────────────────────────
         if norm.intent == "COUNT_QUERY":
-            # For section count, check if evidence comes from document_structure or contains major sections
+            # Check if evidence comes from document_structure or contains section/chapter enumerations
             has_count_evidence = any(
                 e.metadata.get("source") == "document_structure"
-                or "section 1" in e.content.lower()
-                or "section 9" in e.content.lower()
+                or (e.section_number is not None and e.section_number > 0)
+                or bool(re.search(r'\b(?:section|chapter|part)\s+\d+\b', e.content, re.IGNORECASE))
+                or any(kw in e.content.lower() for kw in ["table of contents", "overview of sections", "major sections"])
                 for e in evidence
             )
             return EvidenceCoverageResult(
@@ -74,7 +75,9 @@ class EvidenceCoverageService:
         if norm.intent == "LIST_QUERY":
             has_sections = any(
                 e.metadata.get("source") == "document_structure"
-                or ("section" in e.content.lower() and any(f"section {i}" in e.content.lower() for i in range(1, 10)))
+                or (e.section_number is not None and e.section_number > 0)
+                or bool(re.search(r'\b(?:section|chapter|part)\s+\d+\b', e.content, re.IGNORECASE))
+                or any(kw in e.content.lower() for kw in ["table of contents", "overview of sections", "all sections"])
                 for e in evidence
             )
             return EvidenceCoverageResult(
@@ -84,50 +87,86 @@ class EvidenceCoverageService:
                 entities_found=["sections"] if has_sections else [],
                 relationship_supported=True,
                 connecting_evidence_found=True,
-                reason="Section list retrieved from document structure.",
+                reason="Section list retrieved from document structure or section headers." if has_sections else "Insufficient section index available.",
             )
 
         # ── 3. PAGE_NUMBER_FORMAT Coverage ───────────────────────────────────
         if norm.intent == "PAGE_NUMBER_FORMAT":
-            notation = norm.extracted_notation or "2-3"
-            # Require verbatim appearance of notation or item number explanation
-            has_notation = (notation in all_text) or ("item number" in all_text) or ("consecutive page" in all_text)
+            notation = norm.extracted_notation
+            if notation:
+                has_notation = (notation in all_text) or ("item number" in all_text) or ("consecutive page" in all_text)
+            else:
+                has_notation = any(
+                    kw in all_text
+                    for kw in ["page number", "page format", "item number", "consecutive page", "notation"]
+                )
             return EvidenceCoverageResult(
                 coverage_status="COMPLETE" if has_notation else "INSUFFICIENT",
                 answerable=has_notation,
-                entities_required=[notation],
-                entities_found=[notation] if has_notation else [],
+                entities_required=[notation] if notation else ["page_format"],
+                entities_found=[notation] if (notation and has_notation) else (["page_format"] if has_notation else []),
                 relationship_supported=True,
                 connecting_evidence_found=has_notation,
-                reason="Page number format explanation found." if has_notation else f"Notation {notation} not explicitly explained in retrieved passages.",
+                reason="Page number format explanation found." if has_notation else (f"Notation {notation} not explicitly explained in retrieved passages." if notation else "Page format explanation not found in retrieved passages."),
             )
+
+        # ── Helper for robust entity presence in evidence ────────────────────
+        def _check_entity_presence(entity_str: str) -> bool:
+            if not entity_str:
+                return True
+            low_ent = entity_str.lower().strip()
+            if low_ent in all_text:
+                return True
+            # Strip query fluff words
+            fluff = {
+                "the", "a", "an", "described", "in", "manual", "system",
+                "relevant", "operating", "principles", "section", "for",
+                "of", "and", "or", "to", "how", "what", "which",
+            }
+            tokens = [t for t in re.findall(r"\w+", low_ent) if len(t) > 2 and t not in fluff]
+            if not tokens:
+                tokens = [t for t in re.findall(r"\w+", low_ent) if len(t) > 2]
+            if not tokens:
+                return True
+
+            for e in evidence:
+                doc_header = f"{e.file_name or ''} {e.section_title or ''} {e.section or ''}".lower()
+                if any(t in e.content.lower() or t in doc_header for t in tokens):
+                    return True
+            matches = sum(1 for t in tokens if t in all_text)
+            return matches >= max(1, len(tokens) // 2)
 
         # ── 4. COMPARISON Coverage ────────────────────────────────────────────
         # e.g. "difference between safety and caution", "compare X and Y"
-        if norm.intent == "COMPARISON" and "symbol" not in norm.clean_query.lower():
+        is_symbol_query = "symbol" in norm.clean_query.lower() and any(
+            w in norm.clean_query.lower() for w in ["safety", "precaution", "caution"]
+        )
+
+        if norm.intent == "COMPARISON" and not is_symbol_query:
             lowered_q = norm.clean_query.lower()
-            # Extract the two things being compared
-            match = re.search(r"(?:difference between|compare)\s+(?:the\s+)?(.+?)\s+(?:and|vs\.?|versus)\s+(?:the\s+)?(.+?)(?:\?|$)", lowered_q)
+            match = re.search(
+                r"(?:difference between|compare)\s+(?:the\s+)?(.+?)\s+(?:and|vs\.?|versus)\s+(?:the\s+)?(.+?)(?:\?|$)",
+                lowered_q,
+            )
             ent_a, ent_b = "", ""
             if match:
                 ent_a = match.group(1).strip()
                 ent_b = match.group(2).strip()
 
-            found_a = any(ent_a.lower() in e.content.lower() for e in evidence) if ent_a else True
-            found_b = any(ent_b.lower() in e.content.lower() for e in evidence) if ent_b else True
+            found_a = _check_entity_presence(ent_a) if ent_a else True
+            found_b = _check_entity_presence(ent_b) if ent_b else True
 
-            # For comparison, if we have ANY relevant evidence, allow answering
             if found_a and found_b:
                 return EvidenceCoverageResult(
                     coverage_status="COMPLETE",
                     answerable=True,
-                    entities_required=[ent_a, ent_b],
-                    entities_found=[ent_a, ent_b],
+                    entities_required=[ent_a, ent_b] if (ent_a and ent_b) else norm.extracted_entities,
+                    entities_found=[e for e in [ent_a, ent_b] if e] or norm.extracted_entities,
                     relationship_supported=True,
                     connecting_evidence_found=True,
-                    reason="Both comparison subjects found in retrieved evidence.",
+                    reason="Both comparison subjects supported by retrieved evidence.",
                 )
-            elif evidence:  # At least some evidence — let LLM answer with what it has
+            elif (found_a or found_b) and evidence:
                 return EvidenceCoverageResult(
                     coverage_status="PARTIAL",
                     answerable=True,
@@ -135,7 +174,8 @@ class EvidenceCoverageService:
                     entities_found=[ent_a] if found_a else ([ent_b] if found_b else []),
                     relationship_supported=False,
                     connecting_evidence_found=False,
-                    reason="Partial evidence for comparison — one or both subjects may be present.",
+                    inferred_only=True,
+                    reason="Partial evidence available; one comparison subject has limited evidence.",
                 )
             else:
                 return EvidenceCoverageResult(
@@ -145,11 +185,11 @@ class EvidenceCoverageService:
                     entities_found=[],
                     relationship_supported=False,
                     connecting_evidence_found=False,
-                    reason="No evidence retrieved for comparison subjects.",
+                    reason="Retrieved evidence does not cover the comparison subjects.",
                 )
 
-        # ── 5. RELATIONSHIP Strict 5-Step Validation ─────────────────────────
-        if norm.intent == "SYMBOL_PURPOSE":
+        # ── 5. SYMBOL_PURPOSE or Symbol-Specific Comparison ───────────────────
+        if norm.intent == "SYMBOL_PURPOSE" or (norm.intent == "COMPARISON" and is_symbol_query):
             required_phrases = [
                 "special safety precautions",
                 "internal pressure",
@@ -165,32 +205,33 @@ class EvidenceCoverageService:
                 relationship_supported=complete,
                 connecting_evidence_found=complete,
                 reason="All three symbol-purpose categories are explicitly present."
-                if complete else "One or more symbol-purpose categories are missing.",
+                if complete
+                else "One or more symbol-purpose categories are missing from evidence.",
             )
 
+        # ── 6. RELATIONSHIP & Multi-System Interaction Coverage ───────────────
         if norm.intent == "RELATIONSHIP":
             lowered_q = norm.clean_query.lower()
-            # Try to identify entity A and entity B from query
-            match = re.search(r"(?:between|how is)\s+(.+?)\s+(?:and|related to)\s+(.+)", lowered_q)
+            match = re.search(
+                r"(?:between|how is|how does|how the)\s+(.+?)\s+(?:and|related to|influence|influences|interact|interacts|affect|affects)\s+(.+)",
+                lowered_q,
+            )
             ent_a, ent_b = "", ""
             if match:
                 ent_a = match.group(1).strip().replace("section ", "")
                 ent_b = match.group(2).strip().replace("section ", "")
 
-            found_a = any(ent_a.lower() in e.content.lower() for e in evidence) if ent_a else True
-            found_b = any(ent_b.lower() in e.content.lower() for e in evidence) if ent_b else True
+            found_a = _check_entity_presence(ent_a) if ent_a else True
+            found_b = _check_entity_presence(ent_b) if ent_b else True
 
-            # Look for explicit connecting / cross-reference phrases
+            # Domain connecting terms for industrial systems (hydraulic, electrical, mechatronics)
             connecting_terms = [
-                "reference material",
-                "serves as",
-                "used for",
-                "refer to",
-                "correlat",
-                "troubleshoot",
-                "related to",
-                "connection",
-                "pertains to",
+                "reference material", "serves as", "used for", "refer to",
+                "correlat", "troubleshoot", "related to", "connection",
+                "pertains to", "control", "signal", "valve", "sensor",
+                "switch", "pressure", "flow", "circuit", "actuat",
+                "drive", "influenc", "interact", "interlock", "eppr",
+                "pump", "motor", "spool", "solenoid",
             ]
             has_connection = any(term in all_text for term in connecting_terms)
 
@@ -198,11 +239,11 @@ class EvidenceCoverageService:
                 return EvidenceCoverageResult(
                     coverage_status="COMPLETE",
                     answerable=True,
-                    entities_required=[ent_a, ent_b],
-                    entities_found=[e for e in [ent_a, ent_b] if e],
+                    entities_required=[ent_a, ent_b] if (ent_a and ent_b) else norm.extracted_entities,
+                    entities_found=[e for e in [ent_a, ent_b] if e] or norm.extracted_entities,
                     relationship_supported=True,
                     connecting_evidence_found=True,
-                    reason="Explicit relationship or cross-reference found in source evidence.",
+                    reason="Explicit relationship or functional connection supported by source evidence.",
                 )
             elif found_a and found_b:
                 return EvidenceCoverageResult(
@@ -213,43 +254,46 @@ class EvidenceCoverageService:
                     relationship_supported=False,
                     connecting_evidence_found=False,
                     inferred_only=True,
-                    reason="Both entities found but explicit connecting passage is missing.",
+                    reason="Evidence found for both entities, but explicit direct connection passage is missing.",
+                )
+            elif (found_a or found_b) and evidence:
+                return EvidenceCoverageResult(
+                    coverage_status="PARTIAL",
+                    answerable=True,
+                    entities_required=[ent_a, ent_b],
+                    entities_found=[ent_a] if found_a else ([ent_b] if found_b else []),
+                    relationship_supported=False,
+                    connecting_evidence_found=False,
+                    inferred_only=True,
+                    reason="Partial evidence available for relationship inquiry.",
                 )
             else:
                 return EvidenceCoverageResult(
                     coverage_status="INSUFFICIENT",
                     answerable=False,
                     entities_required=[ent_a, ent_b],
-                    entities_found=[e for e in [ent_a, ent_b] if e in all_text],
+                    entities_found=[e for e in [ent_a, ent_b] if _check_entity_presence(e)],
                     relationship_supported=False,
                     connecting_evidence_found=False,
                     reason="One or both entities missing from retrieved evidence.",
                 )
 
-        # ── 6. Standard Coverage (GENERAL_QA, MAINTENANCE, PROCEDURE, SPECIFICATION, etc.) ─
-        if norm.intent == "COMPARISON" and "symbol" in norm.clean_query.lower():
-            required_phrases = [
-                "special safety precautions",
-                "internal pressure",
-                "preserving standards",
-            ]
-            found = [phrase for phrase in required_phrases if phrase in all_text]
-            complete = len(found) == len(required_phrases)
+        # ── 7. Standard Coverage (GENERAL_QA, MAINTENANCE, PROCEDURE, SPECIFICATION, etc.) ─
+        if not evidence:
             return EvidenceCoverageResult(
-                coverage_status="COMPLETE" if complete else "PARTIAL",
-                answerable=complete,
-                entities_required=["safety symbol", "caution symbol", "internal-pressure safety indication"],
-                entities_found=found,
-                relationship_supported=complete,
-                connecting_evidence_found=complete,
-                reason="Symbol meanings and internal-pressure distinction are grounded in the indexed table."
-                if complete else "Symbol meaning evidence is incomplete.",
+                coverage_status="INSUFFICIENT",
+                answerable=False,
+                entities_required=norm.extracted_entities,
+                entities_found=[],
+                relationship_supported=False,
+                connecting_evidence_found=False,
+                reason="No evidence retrieved to answer query.",
             )
 
-        # For all non-structural intents with retrieved evidence, allow generation.
+        # For general queries with retrieved evidence, allow grounded generation
         return EvidenceCoverageResult(
-            coverage_status="COMPLETE" if len(evidence) > 0 else "INSUFFICIENT",
-            answerable=len(evidence) > 0,
+            coverage_status="COMPLETE",
+            answerable=True,
             entities_required=norm.extracted_entities,
             entities_found=[e for e in norm.extracted_entities if e.lower() in all_text],
             relationship_supported=True,

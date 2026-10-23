@@ -27,36 +27,132 @@ class LLMProviderError(RuntimeError):
     """A configured provider could not complete a generation request."""
 
 
-def format_evidence_context(evidence: list[SearchResult], max_total_chars: int = 4000) -> str:
-    """Format retrieved chunks into a clean, standardized evidence block without raw UUIDs or duplicates."""
-    context_blocks = []
-    seen_hashes = set()
-    total_chars = 0
-    
-    for idx, item in enumerate(evidence, start=1):
+def format_evidence_context(
+    evidence: list[SearchResult],
+    max_total_chars: int | None = None,
+    max_chunks_per_source: int = 3,
+) -> str:
+    """Format retrieved chunks into a clean, standardized evidence block with document identity,
+    page numbers, section information, and diversity-aware context packing."""
+    if not evidence:
+        return ""
+
+    if max_total_chars is None:
+        import os
+        try:
+            max_total_chars = int(os.environ.get("RAG_MAX_CONTEXT_CHARS", "14000"))
+        except (ValueError, TypeError):
+            max_total_chars = 14000
+
+    # 1. Deduplicate identical / near-identical chunks based on first 120 chars
+    seen_hashes: set[str] = set()
+    deduped_candidates: list[SearchResult] = []
+    for item in evidence:
         content = (item.content or "").strip()
         if not content:
             continue
-            
-        # Deduplicate identical / near-identical chunks based on first 120 chars
         content_key = content[:120].lower()
         if content_key in seen_hashes:
             continue
         seen_hashes.add(content_key)
+        deduped_candidates.append(item)
 
-        ctx_prefix = f" [{item.context_prefix}]" if item.context_prefix else ""
+    if not deduped_candidates:
+        return ""
+
+    # 2. Diversity-aware candidate selection:
+    # Group candidates by document identity (file_name or document_id)
+    doc_groups: dict[str, list[SearchResult]] = {}
+    for item in deduped_candidates:
+        src = (
+            item.file_name
+            or (item.metadata.get("file_name") if isinstance(item.metadata, dict) else None)
+            or item.document_id
+            or "unknown"
+        )
+        if src not in doc_groups:
+            doc_groups[src] = []
+        doc_groups[src].append(item)
+
+    # Pass 1: Select up to `max_chunks_per_source` from each distinct manual/document
+    # to guarantee multi-manual representation when multiple manuals are retrieved
+    selected: list[SearchResult] = []
+    selected_chunk_ids: set[str] = set()
+
+    if len(doc_groups) > 1:
+        # Take top candidates from each document up to max_chunks_per_source
+        for src, items in doc_groups.items():
+            for item in items[:max_chunks_per_source]:
+                if item.chunk_id not in selected_chunk_ids:
+                    selected.append(item)
+                    selected_chunk_ids.add(item.chunk_id)
+
+        # Pass 2: Fill remaining candidates across all documents by relevance score
+        for item in deduped_candidates:
+            if item.chunk_id not in selected_chunk_ids:
+                selected.append(item)
+                selected_chunk_ids.add(item.chunk_id)
+
+        # Re-sort the final selected set by relevance score descending
+        selected.sort(key=lambda x: x.score, reverse=True)
+    else:
+        # Single document: use strict score order
+        selected = deduped_candidates
+
+    # 3. Assemble formatted evidence blocks up to max_total_chars
+    context_blocks = []
+    total_chars = 0
+
+    for idx, item in enumerate(selected, start=1):
+        content = (item.content or "").strip()
+        manual_name = (
+            item.file_name
+            or (item.metadata.get("file_name") if isinstance(item.metadata, dict) else "")
+        )
+        manual_header = f": {manual_name}" if manual_name else ""
         page_info = f" (Page {item.page_number})" if item.page_number and item.page_number > 0 else ""
-        block = f"[Source {idx}{page_info}{ctx_prefix}]\n{content}"
-        
+        sec = item.section_title or item.section
+        sec_info = f" [Section: {sec}]" if sec else ""
+        ctx_prefix = f" [{item.context_prefix}]" if item.context_prefix and not sec_info else ""
+
+        block = f"[Source {idx}{manual_header}{page_info}{sec_info}{ctx_prefix}]\n{content}"
+
         if len(block) > max_total_chars or total_chars + len(block) > max_total_chars:
-            # Leave room for later, more relevant evidence instead of
-            # discarding the remainder after one large chunk.
+            # Skip this block if it exceeds budget, but leave room for other blocks
             continue
 
         context_blocks.append(block)
         total_chars += len(block)
 
     return "\n\n".join(context_blocks)
+
+
+def get_context_summary(
+    evidence: list[SearchResult],
+    max_total_chars: int | None = None,
+) -> dict[str, Any]:
+    """Helper to return observability metrics about the packed context."""
+    if max_total_chars is None:
+        import os
+        try:
+            max_total_chars = int(os.environ.get("RAG_MAX_CONTEXT_CHARS", "14000"))
+        except (ValueError, TypeError):
+            max_total_chars = 14000
+
+    formatted = format_evidence_context(evidence, max_total_chars=max_total_chars)
+    manual_names = set()
+    for item in evidence:
+        name = item.file_name or (item.metadata.get("file_name") if isinstance(item.metadata, dict) else None)
+        if name:
+            manual_names.add(name)
+
+    return {
+        "context_char_count": len(formatted),
+        "context_chunks_count": formatted.count("[Source ") if formatted else 0,
+        "context_truncated": len(formatted) >= max_total_chars - 500,
+        "max_context_chars": max_total_chars,
+        "source_manuals": sorted(list(manual_names)),
+    }
 
 
 DEFAULT_SYSTEM_INSTRUCTION = (
@@ -98,8 +194,10 @@ def clean_generated_answer(answer: str) -> str:
     return cleaned
 
 
-def get_intent_system_instruction(intent: str | None = None) -> str:
+def get_intent_system_instruction(intent: str | None = None, query: str | None = None) -> str:
     """Returns specialized, intent-grounded system instructions."""
+    q_lower = (query or "").lower()
+
     if intent == "COUNT_QUERY":
         return (
             DEFAULT_SYSTEM_INSTRUCTION + "\n\n"
@@ -121,33 +219,46 @@ def get_intent_system_instruction(intent: str | None = None) -> str:
             DEFAULT_SYSTEM_INSTRUCTION + "\n\n"
             "SPECIFIC DIRECTIVE FOR PAGE NUMBER FORMAT QUESTIONS:\n"
             "- Explain the exact meaning of each number according to the retrieved document passage.\n"
-            "- Specifically: for notation like '2-3', state what the first number represents (Item number, e.g. Item 2 = Structure and Function) "
-            "and what the second number represents (consecutive page number for each item).\n"
+            "- State what the first component represents (e.g. section or item number) and what the second component represents (e.g. page number) strictly based on the retrieved explanation.\n"
             "- Do NOT swap the numbers or guess their meaning."
         )
     elif intent == "RELATIONSHIP":
         return (
             DEFAULT_SYSTEM_INSTRUCTION + "\n\n"
-            "SPECIFIC DIRECTIVE FOR RELATIONSHIP QUESTIONS:\n"
-            "- Answer ONLY relationships that are explicitly stated in the retrieved evidence (e.g. cross-references or direct descriptions).\n"
-            "- If the relationship is not explicitly stated in the evidence, state: 'The manual does not explicitly establish that relationship.'\n"
+            "SPECIFIC DIRECTIVE FOR RELATIONSHIP & INTERACTION QUESTIONS:\n"
+            "- Explain the relationships, interactions, or signal/power flows between components or subsystems strictly using the retrieved evidence.\n"
+            "- Clearly identify the source manual and subsystem for each stated function (e.g. Hydraulic System vs Mechatronics/Electrical control).\n"
+            "- If the relationship or interaction between two components is not explicitly documented in the evidence, state: 'The manual does not explicitly establish that relationship.'\n"
             "- If an inference is made, explicitly label it: '[INFERENCE — not directly stated in manual]'."
         )
     elif intent == "SYMBOL_PURPOSE":
         return (
             DEFAULT_SYSTEM_INSTRUCTION + "\n\n"
             "SPECIFIC DIRECTIVE FOR SYMBOL-PURPOSE QUESTIONS:\n"
-            "- List the three indexed purpose categories explicitly: special safety precautions, extra-special precautions due to internal pressure, and technical or standards-preservation precautions.\n"
-            "- Use only the indexed wording and do not invent symbol names or safety rules."
+            "- List the safety and purpose categories explicitly as defined in the retrieved evidence.\n"
+            "- Use only the indexed wording from the evidence and do not invent symbol names or safety rules."
         )
     elif intent == "COMPARISON":
-        return (
-            DEFAULT_SYSTEM_INSTRUCTION + "\n\n"
-            "SPECIFIC DIRECTIVE FOR SYMBOL COMPARISONS:\n"
-            "- Compare the safety and caution meanings using the indexed precaution categories.\n"
-            "- Include the internal-pressure extra-safety distinction when present.\n"
-            "- Do not invent labels or details absent from the evidence."
-        )
+        # Apply specialized safety-symbol directive ONLY when the query actually concerns safety symbols / precaution marks
+        is_symbol_query = any(w in q_lower for w in ["symbol", "caution mark", "precaution mark", "warning sign", "safety sign"])
+        if is_symbol_query:
+            return (
+                DEFAULT_SYSTEM_INSTRUCTION + "\n\n"
+                "SPECIFIC DIRECTIVE FOR SYMBOL COMPARISONS:\n"
+                "- Compare the safety and caution meanings using the indexed precaution categories.\n"
+                "- Include the internal-pressure extra-safety distinction when present.\n"
+                "- Do not invent labels or details absent from the evidence."
+            )
+        else:
+            return (
+                DEFAULT_SYSTEM_INSTRUCTION + "\n\n"
+                "SPECIFIC DIRECTIVE FOR TECHNICAL COMPARISONS:\n"
+                "- Compare the operating principles, components, specifications, maintenance standards, or troubleshooting procedures across the identified systems and manuals strictly using the provided evidence.\n"
+                "- Clearly attribute each principle, specification, or procedure to its respective source manual and section (e.g. Hydraulic System Manual, Mechatronics System Manual, Electrical System Manual).\n"
+                "- Explicitly contrast their functional roles, operating parameters, control mechanisms, or diagnostic steps based on the evidence.\n"
+                "- Do not invent facts, specifications, or relationships absent from the retrieved evidence.\n"
+                "- If evidence for one compared subject is detailed but evidence for another is incomplete or missing, explicitly state the limitation rather than extrapolating."
+            )
     return DEFAULT_SYSTEM_INSTRUCTION
 
 

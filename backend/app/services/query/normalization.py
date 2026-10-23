@@ -241,6 +241,7 @@ class NormalizedQuery(BaseModel):
     requested_section_number: int | None = None  # set when intent == SECTION_LOOKUP
     extracted_notation: str | None = None        # e.g. '2-3' for PAGE_NUMBER_FORMAT
     answer_type: str = "text"                    # 'count' | 'list' | 'definition' | 'relationship' | 'text'
+    intent_confidence: float = 1.0               # Calibrated intent classification confidence
 
 
 class QueryNormalizationService:
@@ -410,26 +411,37 @@ class QueryNormalizationService:
 
         # ── 6. Other intent heuristics ────────────────────────────────────────
         intent = "GENERAL_QA"
+        intent_conf = 0.60
         if any(kw in lowered for kw in ["diagram", "schematic", "drawing", "blueprint"]):
             intent = "DIAGRAM_RETRIEVAL"
+            intent_conf = 0.88
         elif any(kw in lowered for kw in ["image", "photo", "picture"]):
             intent = "IMAGE_RETRIEVAL"
+            intent_conf = 0.88
         elif any(kw in lowered for kw in ["page"]):
             intent = "PAGE_RETRIEVAL"
+            intent_conf = 0.85
         elif any(kw in lowered for kw in ["how to", "procedure", "steps", "instructions"]):
             intent = "PROCEDURE"
+            intent_conf = 0.90
         elif any(kw in lowered for kw in ["maintenance", "replace", "install", "service"]):
             intent = "MAINTENANCE"
+            intent_conf = 0.90
         elif any(kw in lowered for kw in ["specification", "capacity", "torque", "clearance", "weight", "dimension", "size"]):
             intent = "SPECIFICATION"
+            intent_conf = 0.90
         elif any(kw in lowered for kw in ["troubleshoot", "problem", "issue", "symptom", "won't start", "not working"]):
             intent = "TROUBLESHOOTING"
+            intent_conf = 0.90
         elif any(kw in lowered for kw in ["cause", "root cause", "why did"]):
             intent = "ROOT_CAUSE_ANALYSIS"
+            intent_conf = 0.88
         elif any(kw in lowered for kw in ["predict", "likely to fail", "history", "failure rate"]):
             intent = "PREDICTIVE_MAINTENANCE"
+            intent_conf = 0.85
         elif any(kw in lowered for kw in ["compare", "difference between", "vs"]):
             intent = "COMPARISON"
+            intent_conf = 0.92
             # Extract the two entities being compared (e.g. "safety" and "caution")
             comp_match = re.search(
                 r"(?:difference between|compare)\s+(?:the\s+)?(.+?)\s+(?:and|vs\.?|versus)\s+(?:the\s+)?(.+?)(?:\?|$)",
@@ -440,8 +452,10 @@ class QueryNormalizationService:
                 entities.append(comp_match.group(2).strip())
         elif re.search(r"\b[a-z0-9]+-[0-9]+\b", lowered) or any(kw in lowered for kw in ["error code", "fault code"]):
             intent = "ERROR_CODE"
+            intent_conf = 0.92
         elif any(kw in lowered for kw in ["connected to", "relationship", "depends on"]):
             intent = "RELATIONSHIP"
+            intent_conf = 0.88
 
         return NormalizedQuery(
             raw_query=query,
@@ -449,6 +463,7 @@ class QueryNormalizationService:
             retrieval_query=retrieval_q,
             typo_query=typo_q,
             intent=intent,
+            intent_confidence=intent_conf,
             extracted_entities=entities,
             requested_section_number=None,
         )

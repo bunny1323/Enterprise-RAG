@@ -251,7 +251,7 @@ async def chat_query(
     response_data = QueryResponse(
         answer=final_state["answer"],
         intent=final_state.get("intent", "GENERAL_QA"),
-        intent_confidence=1.0,
+        intent_confidence=final_state.get("intent_confidence", 0.95),
         citations=final_state["citations"],
         confidence=final_state["confidence_level"],
         confidence_score=final_state["confidence_score"],
@@ -374,6 +374,16 @@ async def rag_debug(
 
     latency_ms = int((time.time() - start_time) * 1000)
 
+    # Observability: evaluate coverage and context metrics
+    from app.services.generation.llm import get_context_summary
+    from app.services.retrieval.coverage import EvidenceCoverageService
+    coverage_svc = EvidenceCoverageService()
+    cov = coverage_svc.evaluate_coverage(norm, retrieved_state.reranked_results)
+    ctx_summary = get_context_summary(retrieved_state.reranked_results)
+
+    llm_prov = getattr(request.app.state, "llm_provider", None)
+    provider_name = getattr(llm_prov, "_provider_name", "groq") if llm_prov else "unknown"
+
     return {
         "query": body.query,
         "detected_intent": norm.intent,
@@ -382,12 +392,26 @@ async def rag_debug(
         "embedding_provider": "local",
         "embedding_model": getattr(request.app.state.embedder, "_model_name", "unknown"),
         "embedding_dimension": getattr(request.app.state.embedder, "EMBEDDING_DIM", 384),
+        "weaviate_collection": "DocumentChunk",
+        "llm_provider": provider_name,
         "dense_result_count": len(retrieved_state.dense_results),
         "bm25_result_count": len(retrieved_state.bm25_results),
         "graph_result_count": len(retrieved_state.graph_results),
         "fused_result_count": len(retrieved_state.fused_results),
-        "reranker_status": "rrf_fusion",
+        "reranker_status": "cross_encoder" if "rerank" in retrieved_state.strategy_used else "rrf_fusion",
         "final_evidence_count": len(retrieved_state.reranked_results),
+        "source_manuals": ctx_summary.get("source_manuals", []),
+        "context_chunks_count": ctx_summary.get("context_chunks_count", 0),
+        "context_char_count": ctx_summary.get("context_char_count", 0),
+        "context_truncated": ctx_summary.get("context_truncated", False),
+        "answerability": {
+            "answerable": cov.answerable,
+            "coverage_status": cov.coverage_status,
+            "reason": cov.reason,
+            "entities_required": cov.entities_required,
+            "entities_found": cov.entities_found,
+            "relationship_supported": cov.relationship_supported,
+        },
         "source_ids": [r.chunk_id for r in retrieved_state.reranked_results],
         "page_numbers": list({r.page_number for r in retrieved_state.reranked_results if r.page_number}),
         "confidence": retrieved_state.confidence_level,
@@ -459,7 +483,7 @@ async def trace_retrieval(
         client = request.app.state.weaviate
         collection = client._require_client().collections.get("DocumentChunk")
         raw_search = collection.query.bm25(
-            query="kilogram kilograms pound pounds",
+            query=norm.clean_query,
             limit=5,
             return_properties=["chunk_id", "document_id", "content", "section", "page_number", "file_name"]
         )
@@ -470,12 +494,18 @@ async def trace_retrieval(
                 "content": o.properties.get("content", "")[:300]
             })
             
+        from app.services.generation.llm import get_context_summary
+        from app.services.retrieval.coverage import EvidenceCoverageService
+        cov = EvidenceCoverageService().evaluate_coverage(norm, reranked_res)
+        ctx_summary = get_context_summary(reranked_res)
+
         return {
             "norm": {
                 "original": norm.raw_query,
                 "clean": norm.clean_query,
                 "retrieval": norm.retrieval_query,
-                "typo": norm.typo_query
+                "typo": norm.typo_query,
+                "intent": norm.intent,
             },
             "dense": [r.model_dump() for r in dense_res],
             "bm25": [r.model_dump() for r in bm25_res],
@@ -483,7 +513,13 @@ async def trace_retrieval(
             "bm25_typo": [r.model_dump() for r in bm25_typo_res],
             "rrf": [r.model_dump() for r in fused_res],
             "reranked": [r.model_dump() for r in reranked_res],
-            "direct_search": raw_objects
+            "context_summary": ctx_summary,
+            "coverage": {
+                "answerable": cov.answerable,
+                "coverage_status": cov.coverage_status,
+                "reason": cov.reason,
+            },
+            "direct_search": raw_objects,
         }
     except Exception as e:
         import traceback
@@ -519,11 +555,22 @@ async def submit_feedback(body: FeedbackRequest) -> dict:
     summary="RAGAS evaluation metrics summary",
 )
 async def get_evaluation_metrics() -> dict:
-    """Return latest RAGAS evaluation metrics."""
+    """Return latest recorded RAGAS evaluation metrics if available, or clearly indicate unrecorded."""
+    from pathlib import Path
+    import json
+    eval_path = Path("data/evaluations/latest.json")
+    if eval_path.exists():
+        try:
+            with open(eval_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning("evaluation.load_failed", error=str(e))
     return {
-        "faithfulness": 0.94,
-        "context_precision": 0.91,
-        "context_recall": 0.95,
-        "layout_extraction_accuracy": 0.89,
+        "status": "unrecorded",
+        "message": "No offline evaluation benchmark run has been persisted yet.",
+        "faithfulness": None,
+        "context_precision": None,
+        "context_recall": None,
+        "layout_extraction_accuracy": None,
     }
 
