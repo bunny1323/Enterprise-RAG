@@ -23,6 +23,32 @@ class StructureSearchService:
     def __init__(self, postgres_client: PostgresClient) -> None:
         self._postgres = postgres_client
 
+    async def resolve_canonical_document_id(
+        self,
+        document_id: str | None,
+        tenant_id: str = "default",
+    ) -> str | None:
+        """Resolve a duplicate document_id to its canonical_document_id if applicable."""
+        if not document_id:
+            return None
+        try:
+            from uuid import UUID
+            doc_uuid = UUID(str(document_id))
+            row = await self._postgres.fetchrow(
+                """
+                SELECT canonical_document_id, status
+                FROM documents
+                WHERE id = $1 AND tenant_id = $2
+                """,
+                doc_uuid,
+                tenant_id,
+            )
+            if row and row.get("status") == "DUPLICATE" and row.get("canonical_document_id"):
+                return str(row["canonical_document_id"])
+        except Exception:
+            pass
+        return document_id
+
     async def count_sections(
         self,
         tenant_id: str = "default",
@@ -30,10 +56,11 @@ class StructureSearchService:
         document_id: str | None = None,
     ) -> int:
         """Count unique major sections."""
+        resolved_doc_id = await self.resolve_canonical_document_id(document_id, tenant_id)
         count = await self._postgres.count_sections(
             tenant_id=tenant_id,
             knowledge_base_id=knowledge_base_id,
-            document_id=document_id,
+            document_id=resolved_doc_id,
         )
         logger.info("structure_search.count_sections", count=count, tenant=tenant_id)
         return count
@@ -47,10 +74,11 @@ class StructureSearchService:
         """
         Fetch all canonical sections and format as SearchResults for seamless RAG evidence injection.
         """
+        resolved_doc_id = await self.resolve_canonical_document_id(document_id, tenant_id)
         rows = await self._postgres.get_sections(
             tenant_id=tenant_id,
             knowledge_base_id=knowledge_base_id,
-            document_id=document_id,
+            document_id=resolved_doc_id,
         )
         results: list[SearchResult] = []
         for row in rows:

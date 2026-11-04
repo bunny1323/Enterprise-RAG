@@ -141,3 +141,121 @@ async def test_concurrent_upload_unique_violation():
     new_state = await s02_duplicate.step(state, {"postgres": postgres})
     assert new_state.status == DocumentStatus.DUPLICATE
     assert new_state.canonical_document_id == winner_id
+
+
+@pytest.mark.asyncio
+async def test_incomplete_canonical_document_zero_chunks():
+    """
+    Test that an existing canonical document with status=COMPLETED but 0 chunks
+    is rejected as a valid duplicate, neutralized in DB, and allows the fresh document
+    to proceed through full ingestion.
+    """
+    from app.services.deduplication.service import DeduplicationService
+    dedup_svc = DeduplicationService()
+    postgres = AsyncMock()
+    
+    # 1. DB returns row with chunk_count = 0 (corrupted/empty canonical doc)
+    postgres.fetchrow.return_value = {
+        "id": str(uuid4()),
+        "sha256": "corrupt_sha",
+        "file_name": "corrupt.pdf",
+        "version": 1,
+        "content_hash": "c",
+        "chunk_count": 0,
+    }
+    
+    result = await dedup_svc.check_file_hash(
+        sha256="corrupt_sha",
+        tenant_id="tenant_1",
+        current_doc_id=uuid4(),
+        postgres=postgres,
+    )
+    assert result is None, "Corrupted canonical document with 0 chunks must NOT be accepted as duplicate"
+
+
+@pytest.mark.asyncio
+async def test_valid_completed_duplicate_with_chunks():
+    """
+    Test that a valid canonical document with chunks > 0 is correctly identified
+    as a duplicate, marks the state DUPLICATE, records canonical_id, and sets completed_at.
+    """
+    from app.services.deduplication.service import DeduplicationService
+    dedup_svc = DeduplicationService()
+    postgres = AsyncMock()
+    canonical_id = uuid4()
+    
+    postgres.fetchrow.return_value = {
+        "id": str(canonical_id),
+        "sha256": "valid_sha",
+        "file_name": "valid.pdf",
+        "version": 1,
+        "content_hash": "c",
+        "chunk_count": 42,
+    }
+    
+    result = await dedup_svc.check_file_hash(
+        sha256="valid_sha",
+        tenant_id="tenant_1",
+        current_doc_id=uuid4(),
+        postgres=postgres,
+    )
+    assert result is not None
+    assert result["id"] == str(canonical_id)
+    assert result["chunk_count"] == 42
+
+
+@pytest.mark.asyncio
+async def test_canonical_resolution_for_duplicate_and_missing():
+    """
+    Test that StructureSearchService resolves DUPLICATE document IDs to their canonical_document_id,
+    and cleanly falls back to the original document ID if missing or non-duplicate.
+    """
+    from app.services.retrieval.structure_search import StructureSearchService
+    postgres = AsyncMock()
+    svc = StructureSearchService(postgres)
+    
+    dup_id = uuid4()
+    canonical_id = uuid4()
+    
+    # 1. When document is a duplicate, resolves to canonical_id
+    postgres.fetchrow.return_value = {
+        "status": "DUPLICATE",
+        "canonical_document_id": canonical_id,
+    }
+    resolved = await svc.resolve_canonical_document_id(str(dup_id), "tenant_1")
+    assert resolved == str(canonical_id)
+    
+    # 2. When document is missing (None returned from DB), safely returns original document_id
+    postgres.fetchrow.return_value = None
+    resolved_missing = await svc.resolve_canonical_document_id(str(dup_id), "tenant_1")
+    assert resolved_missing == str(dup_id)
+
+
+def test_document_status_response_duplicate_fields():
+    """
+    Test that DocumentStatusResponse supports canonical_document_id and is_duplicate flag.
+    """
+    from datetime import datetime, timezone
+    from app.models.document import DocumentStatusResponse, DocumentStatus
+    
+    doc_id = uuid4()
+    canon_id = uuid4()
+    now = datetime.now(timezone.utc)
+    
+    resp = DocumentStatusResponse(
+        document_id=doc_id,
+        status=DocumentStatus.DUPLICATE,
+        progress_percent=100,
+        created_at=now,
+        completed_at=now,
+        canonical_document_id=canon_id,
+        is_duplicate=True,
+    )
+    assert resp.is_duplicate is True
+    assert resp.canonical_document_id == canon_id
+    assert resp.status == DocumentStatus.DUPLICATE
+    
+    d = resp.model_dump()
+    assert d["canonical_document_id"] == canon_id
+    assert d["is_duplicate"] is True
+

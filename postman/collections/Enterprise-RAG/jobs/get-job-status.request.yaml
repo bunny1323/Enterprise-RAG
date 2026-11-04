@@ -1,0 +1,29 @@
+$kind: http-request
+name: Get Job Status
+method: GET
+url: '{{base_url}}/api/v1/jobs/{{job_id}}'
+order: 7000
+headers:
+  - key: X-Tenant-ID
+    value: '{{tenant_id}}'
+  - key: X-Assistant-ID
+    value: '{{assistant_id}}'
+  - key: X-Knowledge-Base-ID
+    value: '{{knowledge_base_id}}'
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("Status is 200", () => pm.response.to.have.status(200));
+      pm.test("Has job_id", () => {
+          const json = pm.response.json();
+          pm.expect(json).to.have.property("job_id");
+      });
+      pm.test("Has valid status", () => {
+          const json = pm.response.json();
+          pm.expect(["PENDING","PROCESSING","COMPLETED","FAILED","CANCELLED"]).to.include(json.status);
+      });
+      pm.test("Has progress_percent between 0 and 100", () => {
+          const json = pm.response.json();
+          pm.expect(json.progress_percent).to.be.within(0, 100);
+      });

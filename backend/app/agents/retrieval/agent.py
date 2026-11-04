@@ -8,12 +8,22 @@ Calls stateless services — does not reimplement business logic directly.
 """
 
 import asyncio
+import os
+import re
 from typing import Any
+
 from app.agents.retrieval.state import QueryState
 from app.config.logging import get_logger
+from app.config.opentelemetry import get_tracer
+from app.models.retrieval import SearchResult
 from app.services.cache.service import CacheService
 from app.services.confidence.service import ConfidenceScoringService
 from app.services.embeddings.service import EmbeddingService
+from app.services.query.decomposition import (
+    _COMPARISON_CONNECTIVES,
+    _RELATIONSHIP_CONNECTIVES,
+    QueryDecompositionService,
+)
 from app.services.query.normalization import QueryNormalizationService
 from app.services.retrieval.bm25_search import BM25SearchService
 from app.services.retrieval.dense_search import DenseSearchService
@@ -21,14 +31,146 @@ from app.services.retrieval.graph_search import GraphSearchService
 from app.services.retrieval.hierarchical import HierarchicalRetrievalService
 from app.services.retrieval.reranking import RRFRerankerService
 from app.services.retrieval.structure_search import StructureSearchService
-from app.services.query.decomposition import QueryDecompositionService
 from app.utils.fusion import reciprocal_rank_fusion
-from app.models.retrieval import SearchResult
-
-from app.config.opentelemetry import get_tracer
 
 logger = get_logger(__name__)
 tracer = get_tracer()
+
+
+def _source_key(result: SearchResult) -> str:
+    """Return a stable source identifier for a SearchResult."""
+    return (
+        result.file_name
+        or (result.metadata.get("file_name") if isinstance(result.metadata, dict) else None)
+        or result.document_id
+        or "unknown"
+    )
+
+
+def _trace_results(results: list[SearchResult]) -> list[dict[str, Any]]:
+    """Return source-safe ranking metadata without exposing chunk contents."""
+    return [
+        {
+            "rank": rank,
+            "chunk_id": result.chunk_id,
+            "document_id": result.document_id,
+            "file_name": _source_key(result),
+            "page_number": result.page_number,
+            "section": result.section_title or result.section,
+            "score": result.score,
+            "matched_subqueries": result.metadata.get("_retrieval_subqueries", []),
+            "requirement_scores": result.metadata.get("_rerank_requirement_scores", {}),
+        }
+        for rank, result in enumerate(results, start=1)
+    ]
+
+
+def _deduplicate_parent_candidates(results: list[SearchResult]) -> list[SearchResult]:
+    """Keep the highest-ranked result for each eventual parent evidence chunk."""
+    seen: set[str] = set()
+    unique = []
+    for result in results:
+        evidence_id = result.parent_id or result.chunk_id
+        if evidence_id in seen:
+            continue
+        seen.add(evidence_id)
+        unique.append(result)
+    return unique
+
+
+def _section_lookup_evidence(
+    results: list[SearchResult],
+    section_number: int | None,
+) -> list[SearchResult]:
+    """Keep only chunks explicitly belonging to or introducing the requested section."""
+    if section_number is None:
+        return results
+
+    heading_pattern = re.compile(rf"\bSECTION\s+{section_number}\b", re.IGNORECASE)
+    return [
+        result for result in results
+        if heading_pattern.search(result.content or "")
+    ]
+
+
+def _diversity_aware_select(
+    reranked: list[SearchResult],
+    top_k: int,
+    min_secondary_score_ratio: float = 0.30,
+    required_queries: list[str] | None = None,
+) -> list[SearchResult]:
+    """Select top evidence while retaining the best candidate per query requirement."""
+    if not reranked or top_k <= 0:
+        return []
+
+    try:
+        ratio = float(os.environ.get("RAG_MIN_SECONDARY_SCORE_RATIO", str(min_secondary_score_ratio)))
+    except (ValueError, TypeError):
+        ratio = min_secondary_score_ratio
+    ratio = max(0.0, min(1.0, ratio))
+
+    selected = list(reranked[:top_k])
+    selected_ids = {item.chunk_id for item in selected}
+    best_by_requirement: dict[str, SearchResult] = {}
+    for requirement in required_queries or []:
+        matching = [
+            item for item in reranked
+            if requirement in item.metadata.get("_retrieval_subqueries", [])
+        ]
+        best = max(
+            matching,
+            key=lambda item: item.metadata.get("_rerank_requirement_scores", {}).get(
+                requirement,
+                item.score,
+            ),
+            default=None,
+        )
+        if best is not None:
+            best_by_requirement[requirement] = best
+
+    for requirement, candidate in best_by_requirement.items():
+        if candidate.chunk_id in selected_ids:
+            continue
+        for index in range(len(selected) - 1, -1, -1):
+            current = selected[index]
+            if any(
+                other_requirement != requirement and best.chunk_id == current.chunk_id
+                for other_requirement, best in best_by_requirement.items()
+            ):
+                continue
+            selected_ids.discard(current.chunk_id)
+            selected[index] = candidate
+            selected_ids.add(candidate.chunk_id)
+            break
+
+    selected_sources: dict[str, list[int]] = {}
+    for index, item in enumerate(selected):
+        selected_sources.setdefault(_source_key(item), []).append(index)
+
+    top_score = reranked[0].score
+    min_acceptable = top_score * ratio
+    for candidate in reranked[top_k:]:
+        source = _source_key(candidate)
+        if candidate.chunk_id in selected_ids or source in selected_sources:
+            continue
+        if candidate.score < min_acceptable:
+            continue
+        for index in range(len(selected) - 1, -1, -1):
+            current_source = _source_key(selected[index])
+            if len(selected_sources.get(current_source, [])) < 2:
+                continue
+            evicted = selected[index]
+            if any(best.chunk_id == evicted.chunk_id for best in best_by_requirement.values()):
+                continue
+            selected[index] = candidate
+            selected_ids.discard(evicted.chunk_id)
+            selected_ids.add(candidate.chunk_id)
+            selected_sources[current_source].remove(index)
+            selected_sources.setdefault(source, []).append(index)
+            break
+
+    return sorted(selected, key=lambda item: item.score, reverse=True)
+
 
 class RetrievalAgent:
     """
@@ -209,6 +351,7 @@ class RetrievalAgent:
                     )
 
             # 2. Parallel retrieval channels
+            extra_ranked_lists: list[list[SearchResult]] = []
             tasks = {
                 "dense": self._dense_svc.search(
                     query_vector=query_vec,
@@ -271,24 +414,6 @@ class RetrievalAgent:
                     corrected=_typo_q[:60],
                 )
 
-            # ── Multi-hop / Relationship sub-query decomposition ───────────────
-            extra_bm25: list[SearchResult] = []
-            if intent in ("SYMBOL_PURPOSE", "MULTI_HOP", "RELATIONSHIP", "COMPARISON"):
-                sub_queries = self._decomposer_svc.decompose(norm)
-                for sq in sub_queries:
-                    if sq.query != norm.clean_query:
-                        try:
-                            sub_res = await self._bm25_svc.search(
-                                query_text=sq.query,
-                                top_k=5,
-                                tenant_id=ctx.tenant_id,
-                                knowledge_base_id=ctx.knowledge_base_id,
-                                permitted_access_levels=permitted_access_levels,
-                            )
-                            extra_bm25.extend(sub_res)
-                        except Exception as e:
-                            logger.warning("retrieval_agent.subquery_bm25_failed", sub_query=sq.query, error=str(e))
-
             if intent in ("RELATIONSHIP", "ROOT_CAUSE_ANALYSIS", "COMPONENT_IDENTIFICATION", "PREDICTIVE_MAINTENANCE"):
                 entity_query = (
                     norm.extracted_entities[0]
@@ -302,18 +427,134 @@ class RetrievalAgent:
                     knowledge_base_id=ctx.knowledge_base_id,
                 )
 
-            # Execute retrieval channels concurrently.
-            results = await asyncio.gather(
-                *tasks.values(),
-                return_exceptions=True,
+            main_task_names = list(tasks)
+            main_task = asyncio.gather(*tasks.values(), return_exceptions=True)
+
+            # ── Multi-hop / Comparison / Relationship sub-query decomposition ──
+            # Triggered by explicit intent labels AND by structural comparison
+            # connectives present in any query (vs., versus, difference between, etc.).
+            # Each subquery fires HYBRID retrieval (dense + BM25) so semantic and
+            # lexical signals both contribute to the candidate pool.
+            _should_decompose = (
+                intent in ("SYMBOL_PURPOSE", "MULTI_HOP", "RELATIONSHIP", "COMPARISON")
+                or _COMPARISON_CONNECTIVES.search(norm.clean_query)
+                or _RELATIONSHIP_CONNECTIVES.search(norm.clean_query)
             )
+            subquery_diagnostics: list[dict[str, Any]] = []
+            sub_queries = []
+            if _should_decompose:
+                sub_queries = self._decomposer_svc.decompose(norm)
+                loop = asyncio.get_running_loop()
+
+                async def retrieve_subquery(
+                    sq: Any,
+                ) -> tuple[list[list[SearchResult]], dict[str, Any]]:
+                    try:
+                        sq_vec = await loop.run_in_executor(
+                            None,
+                            self._embedder.embed_batch,
+                            [sq.query],
+                        )
+                        sq_vector = sq_vec[0] if sq_vec else []
+
+                        sub_tasks = []
+                        sub_channel_names = []
+                        if sq_vector:
+                            sub_channel_names.append("dense")
+                            sub_tasks.append(
+                                self._dense_svc.search(
+                                    query_vector=sq_vector,
+                                    top_k=query_state.top_k * 2,
+                                    tenant_id=ctx.tenant_id,
+                                    knowledge_base_id=ctx.knowledge_base_id,
+                                    permitted_access_levels=permitted_access_levels,
+                                )
+                            )
+                        sub_channel_names.append("bm25")
+                        sub_tasks.append(
+                            self._bm25_svc.search(
+                                query_text=sq.query,
+                                top_k=query_state.top_k * 2,
+                                tenant_id=ctx.tenant_id,
+                                knowledge_base_id=ctx.knowledge_base_id,
+                                permitted_access_levels=permitted_access_levels,
+                            )
+                        )
+
+                        sub_results = await asyncio.gather(*sub_tasks, return_exceptions=True)
+                        ranked_lists = []
+                        channel_trace = {}
+                        for channel_name, sr in zip(sub_channel_names, sub_results):
+                            if isinstance(sr, Exception):
+                                logger.warning(
+                                    "retrieval_agent.subquery_channel_failed",
+                                    sub_query=sq.query[:60],
+                                    error=str(sr),
+                                )
+                            else:
+                                if sr:
+                                    sr = [
+                                        result.model_copy(
+                                            update={
+                                                "metadata": {
+                                                    **result.metadata,
+                                                    "_retrieval_subqueries": [sq.query],
+                                                }
+                                            }
+                                        )
+                                        for result in sr
+                                    ]
+                                    ranked_lists.append(sr)
+                                    channel_trace[channel_name] = _trace_results(sr)
+
+                        logger.debug(
+                            "retrieval_agent.subquery_hybrid",
+                            sub_query=sq.query[:60],
+                            dense_ok=bool(sq_vector),
+                            hits=len([r for r in sub_results if not isinstance(r, Exception)]),
+                        )
+                        return ranked_lists, {
+                            "query": sq.query,
+                            "channels": channel_trace,
+                        }
+                    except Exception as e:
+                        logger.warning(
+                            "retrieval_agent.subquery_failed",
+                            sub_query=sq.query[:60],
+                            error=str(e),
+                        )
+                        return [], {"query": sq.query, "error": str(e)}
+
+                subquery_jobs = [
+                    retrieve_subquery(sq)
+                    for sq in sub_queries
+                    if sq.query.strip().lower() != norm.clean_query.strip().lower()
+                ]
+                subquery_results = await asyncio.gather(*subquery_jobs, return_exceptions=True)
+                for subquery_result in subquery_results:
+                    if isinstance(subquery_result, Exception):
+                        logger.warning(
+                            "retrieval_agent.subquery_failed",
+                            error=str(subquery_result),
+                        )
+                    else:
+                        ranked_lists, subquery_trace = subquery_result
+                        extra_ranked_lists.extend(ranked_lists)
+                        subquery_diagnostics.append(subquery_trace)
+
+            # Main and decomposed retrieval are now complete; each channel remains
+            # an independent ranked list for RRF.
+            results = await main_task
 
             dense_results = []
             bm25_results = []
             graph_results = []
+            morph_results = []
+            typo_results = []
+            reranked_wide = []
             degraded_channels = []
 
-            for i, key in enumerate(tasks.keys()):
+            for i, key in enumerate(main_task_names):
                 res = results[i]
 
                 if isinstance(res, Exception):
@@ -329,15 +570,17 @@ class RetrievalAgent:
                 elif key == "bm25":
                     bm25_results = res
                 elif key == "bm25_morph":
-                    # Morphological BM25 variant — goes into extra_bm25 as a separate RRF channel
-                    extra_bm25.extend(res)
+                    # Preserve this query's independent ranking for RRF.
+                    morph_results = res
+                    extra_ranked_lists.append(res)
                     logger.debug(
                         "retrieval_agent.morphological_bm25_hits",
                         hits=len(res),
                     )
                 elif key == "bm25_typo":
-                    # Typo-corrected BM25 variant — goes into extra_bm25 as a separate RRF channel
-                    extra_bm25.extend(res)
+                    # Preserve this query's independent ranking for RRF.
+                    typo_results = res
+                    extra_ranked_lists.append(res)
                     logger.debug(
                         "retrieval_agent.typo_bm25_hits",
                         hits=len(res),
@@ -350,10 +593,17 @@ class RetrievalAgent:
                 channel_lists.append(dense_results)
             if bm25_results:
                 channel_lists.append(bm25_results)
-            if extra_bm25:
-                channel_lists.append(extra_bm25)
+            channel_lists.extend(result_list for result_list in extra_ranked_lists if result_list)
             if graph_results:
                 channel_lists.append(graph_results)
+
+            logger.info(
+                "retrieval_agent.candidates",
+                dense=len(dense_results),
+                bm25=len(bm25_results),
+                subquery=sum(len(result_list) for result_list in extra_ranked_lists),
+                graph=len(graph_results),
+            )
                 
             # Apply intent-based strategy modifications
             if intent in ("IMAGE_RETRIEVAL", "DIAGRAM_RETRIEVAL", "PAGE_RETRIEVAL", "SPECIFICATION"):
@@ -425,7 +675,7 @@ class RetrievalAgent:
                 fused = reciprocal_rank_fusion(
                     channel_lists,
                     k=60,
-                    top_n=30,
+                    top_n=sum(len(channel) for channel in channel_lists),
                 )
 
                 # ── SECTION_LOOKUP post-fusion boost ──────────────────────────
@@ -445,17 +695,35 @@ class RetrievalAgent:
                         top_section=fused[0].section_number if fused else None,
                     )
 
-                # 4. Rerank fused candidates
+                # 4. Compare the complete global pool before selecting final evidence.
+                reranker_top_n = len(fused)
                 try:
-                    reranked = await self._reranker.rerank(
+                    reranked_wide = await self._reranker.rerank(
                         query=norm.clean_query,
                         candidates=fused,
-                        top_n=query_state.top_k,
+                        top_n=reranker_top_n,
+                        relevance_queries=[sq.query for sq in sub_queries],
                     )
                 except Exception as e:
                     logger.error("retrieval_agent.rerank_failed", error=str(e))
                     degraded_channels.append("rerank")
-                    reranked = fused[:query_state.top_k]
+                    reranked_wide = fused[:reranker_top_n]
+
+                # 4b. Collapse parent/child representations before final selection.
+                selection_pool = _deduplicate_parent_candidates(reranked_wide)
+                reranked = _diversity_aware_select(
+                    selection_pool,
+                    top_k=query_state.top_k,
+                    required_queries=[sq.query for sq in sub_queries],
+                )
+
+                logger.info(
+                    "retrieval_agent.rerank_complete",
+                    wide_pool=len(reranked_wide),
+                    unique_evidence_pool=len(selection_pool),
+                    selected=len(reranked),
+                    sources=len({_source_key(r) for r in reranked}),
+                )
 
                 # 5. Expand retrieved child chunks to their parent chunks
                 hierarchical_results = await self._hierarchical_svc.expand_to_parents(
@@ -463,6 +731,11 @@ class RetrievalAgent:
                     tenant_id=ctx.tenant_id,
                     knowledge_base_id=ctx.knowledge_base_id,
                 )
+                if intent == "SECTION_LOOKUP":
+                    hierarchical_results = _section_lookup_evidence(
+                        hierarchical_results,
+                        norm.requested_section_number,
+                    )
 
                 # 6. Score confidence using the final hierarchical results
                 conf = self._confidence_svc.score(
@@ -503,6 +776,27 @@ class RetrievalAgent:
                     "graph_results": graph_results,
                     "fused_results": fused,
                     "reranked_results": hierarchical_results if channel_lists else [],
+                    "retrieval_diagnostics": {
+                        "query": norm.raw_query,
+                        "normalized_query": norm.clean_query,
+                        "retrieval_query": norm.retrieval_query,
+                        "typo_query": norm.typo_query,
+                        "intent": intent,
+                        "subqueries": subquery_diagnostics,
+                        "channels": {
+                            "dense": _trace_results(dense_results),
+                            "bm25": _trace_results(bm25_results),
+                            "bm25_morph": _trace_results(morph_results),
+                            "bm25_typo": _trace_results(typo_results),
+                            "graph": _trace_results(graph_results),
+                        },
+                        "fused_candidates": _trace_results(fused),
+                        "reranked_candidates": _trace_results(reranked_wide),
+                        "selected_candidates": _trace_results(reranked),
+                        "selected_evidence": _trace_results(hierarchical_results),
+                        "selected_sources": sorted({_source_key(item) for item in hierarchical_results}),
+                        "degraded_channels": degraded_channels,
+                    },
                     "confidence_level": conf_level,
                     "confidence_score": conf_score,
                     "strategy_used": strategy_str,

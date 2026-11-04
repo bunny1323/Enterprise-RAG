@@ -1,6 +1,8 @@
 """
 Query and Retrieval Agent State.
 """
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 from app.models.retrieval import SearchResult
@@ -18,6 +20,7 @@ class QueryState(BaseModel):
     graph_results: list[SearchResult] = Field(default_factory=list)
     fused_results: list[SearchResult] = Field(default_factory=list)
     reranked_results: list[SearchResult] = Field(default_factory=list)
+    retrieval_diagnostics: dict[str, Any] = Field(default_factory=dict)
     confidence_level: str = "HIGH"
     confidence_score: float = 1.0
     strategy_used: str = "hybrid_rrf"

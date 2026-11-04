@@ -1,0 +1,23 @@
+$kind: http-request
+name: Liveness Check
+method: GET
+url: '{{base_url}}/api/v1/health/live'
+order: 1000
+auth:
+  type: noauth
+headers:
+  - key: X-Tenant-ID
+    value: '{{tenant_id}}'
+  - key: X-Assistant-ID
+    value: '{{assistant_id}}'
+  - key: X-Knowledge-Base-ID
+    value: '{{knowledge_base_id}}'
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("Status is 200", () => pm.response.to.have.status(200));
+      pm.test("Returns alive status", () => {
+          const json = pm.response.json();
+          pm.expect(json.status).to.eql("alive");
+      });

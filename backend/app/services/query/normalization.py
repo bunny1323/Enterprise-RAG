@@ -302,6 +302,7 @@ class QueryNormalizationService:
         # ── 2. LIST_QUERY (e.g., "what are the major sections...", "list the sections...") ──
         list_match = (
             re.search(r"\b(what\s+are\s+the\s+(major\s+)?(sections?|chapters?)|list\s+(the\s+)?(major\s+)?(sections?|chapters?))\b", lowered)
+            or bool(re.search(r"\blist\s+all\s+(?:the\s+)?(?:sections?|chapters?)\b", lowered))
             or (any(kw in lowered for kw in ["all sections", "table of contents", "overview of sections"]) and "section" in lowered)
         )
         if list_match:

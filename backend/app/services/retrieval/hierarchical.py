@@ -66,17 +66,23 @@ class HierarchicalRetrievalService:
 
         expanded: list[SearchResult] = []
         seen_parents: set[str] = set()
+        seen_chunks: set[str] = set()
+
+        def append_unique(result: SearchResult) -> None:
+            if result.chunk_id not in seen_chunks:
+                seen_chunks.add(result.chunk_id)
+                expanded.append(result)
 
         for result in results:
             if not result.parent_id:
-                expanded.append(result)
+                append_unique(result)
                 continue
 
             parent = parents.get(result.parent_id)
 
             if parent is None:
                 # Safe fallback: keep original child.
-                expanded.append(result)
+                append_unique(result)
                 continue
 
             parent_id = parent["chunk_id"]
@@ -86,7 +92,7 @@ class HierarchicalRetrievalService:
 
             seen_parents.add(parent_id)
 
-            expanded.append(
+            append_unique(
                 result.model_copy(
                     update={
                         "chunk_id": parent_id,

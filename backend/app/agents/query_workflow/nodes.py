@@ -1,25 +1,48 @@
 """
 LangGraph Nodes for Query Workflow.
 """
-import time
 import asyncio
+
 from app.agents.query_workflow.state import QueryWorkflowState
 from app.agents.retrieval.agent import RetrievalAgent
 from app.agents.retrieval.state import QueryState
+from app.config.logging import get_logger
+from app.config.opentelemetry import get_tracer
+from app.infrastructure.opa.client import OPAClient
+from app.models.retrieval import SearchResult
+from app.services.cache.semantic import SemanticCacheService
+from app.services.cache.service import CacheService
+from app.services.embeddings.service import EmbeddingService
 from app.services.generation.citations import CitationService
 from app.services.generation.hallucination import GroundednessVerificationService
 from app.services.generation.llm import LLMProvider
-from app.services.cache.service import CacheService
-from app.services.cache.semantic import SemanticCacheService
-from app.services.embeddings.service import EmbeddingService
-from app.infrastructure.opa.client import OPAClient
 from app.services.query.normalization import QueryNormalizationService
 from app.services.retrieval.coverage import EvidenceCoverageService
-from app.config.logging import get_logger
-from app.config.opentelemetry import get_tracer
 
 logger = get_logger(__name__)
 tracer = get_tracer()
+
+
+def _deduplicate_evidence_by_source(results: list[SearchResult]) -> list[SearchResult]:
+    seen_hashes: set[tuple[str, str]] = set()
+    deduped: list[SearchResult] = []
+    for item in results:
+        content_hash = item.metadata.get("content_hash", "")
+        if not content_hash:
+            deduped.append(item)
+            continue
+        source = (
+            item.document_id
+            or item.file_name
+            or item.metadata.get("file_name")
+            or "unknown"
+        )
+        identity = (source, content_hash)
+        if identity in seen_hashes:
+            continue
+        seen_hashes.add(identity)
+        deduped.append(item)
+    return deduped
 
 
 class QueryNodes:
@@ -152,18 +175,11 @@ class QueryNodes:
             span.set_attribute("confidence_score", result.confidence_score)
             span.set_attribute("retrieval_strategy", result.strategy_used)
 
-            # Context diversity deduplication based on content hash
-            seen_hashes = set()
-            deduped = []
-            for item in state["reranked_results"]:
-                h = item.metadata.get("content_hash", "")
-                if h and h in seen_hashes:
-                    continue
-                seen_hashes.add(h)
-                deduped.append(item)
-            
-            state["reranked_results"] = deduped
-            span.set_attribute("deduped_results_count", len(deduped))
+            # Deduplicate within each source while preserving cross-manual lineage.
+            state["reranked_results"] = _deduplicate_evidence_by_source(
+                state["reranked_results"]
+            )
+            span.set_attribute("deduped_results_count", len(state["reranked_results"]))
 
             return state
 
@@ -291,12 +307,35 @@ class QueryNodes:
                 span.set_attribute("skipped", True)
                 return state
 
-            citations, sources = self._citation_svc.map_citations(state["answer"], evidence)
             groundedness = self._verifier.verify(state["answer"], evidence)
+            citations, sources = self._citation_svc.map_citations(
+                state["answer"],
+                evidence,
+                supporting_chunk_ids=set(groundedness.supported_chunk_ids),
+            )
 
             state["citations"] = citations
             state["sources"] = sources
             state["verification_status"] = groundedness.verification_status
+            if groundedness.verification_status == "UNSUPPORTED":
+                state["answer"] = "The provided evidence does not contain enough information to answer this question."
+                state["citations"] = []
+                state["sources"] = []
+                state["confidence_level"] = "LOW"
+                state["confidence_score"] = 0.0
+            elif groundedness.verification_status == "PARTIALLY_SUPPORTED":
+                state["answer"] = " ".join(groundedness.supported_sentences)
+                if not state["answer"]:
+                    state["answer"] = "The provided evidence does not contain enough information to answer this question."
+                    state["verification_status"] = "UNSUPPORTED"
+                    state["citations"] = []
+                    state["sources"] = []
+                    state["confidence_level"] = "LOW"
+                    state["confidence_score"] = 0.0
+                else:
+                    state["answer"] += " Other requested details were omitted because the retrieved evidence did not support them."
+                state["confidence_level"] = "LOW"
+                state["confidence_score"] = min(state.get("confidence_score", 0.0), groundedness.score)
             span.set_attribute("verification_status", groundedness.verification_status)
 
             # Update cache if it's a good response

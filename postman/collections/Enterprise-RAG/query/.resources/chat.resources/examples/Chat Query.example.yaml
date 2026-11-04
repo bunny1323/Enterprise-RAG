@@ -1,0 +1,163 @@
+$kind: http-example
+request:
+  url: "{{base_url}}/api/v1/chat"
+  method: POST
+  headers:
+    X-Tenant-ID: "{{tenant_id}}"
+    X-Assistant-ID: "{{assistant_id}}"
+    X-Knowledge-Base-ID: "{{knowledge_base_id}}"
+  body:
+    type: json
+    content: |-
+      {
+        "query": "A technician is dealing with a situation involving performance tests are used for new, working and repaired machines. and engine speed h mode. What does the service-manual set require the technician to know or check about both?",
+        "top_k": 5,
+        "retrieval_profile": "default"
+      }
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    date: Sat, 24 Oct 2026 07:56:44 GMT
+    server: uvicorn
+    content-length: "11557"
+    content-type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "answer": "Performance tests are used to check the operational performance of a new machine (to confirm it meets Hyundai spec after reassembly), a working machine (to check the extent of deterioration before servicing), and a repaired machine (to confirm performance was restored after repair or service).\n\nFor the engine speed in H mode, the technician must:\n1.  **Prepare:** Warm up the machine until the engine coolant temperature reaches 50°C or more and the hydraulic oil is 50 ± 5°C. Set the accel dial at the 10 (Max) position. Push the H-mode switch and confirm that the fuel injection pump governor lever comes into contact with the high-idle stopper.\n2.  **Measure:** Select the H-mode and measure the engine speed with a tachometer.\n3.  **Evaluate:** The measured speed must meet the standard of 2050 ± 50 rpm.",
+        "intent": "MAINTENANCE",
+        "intent_confidence": 0.9,
+        "citations": [
+          {
+            "document_id": "8e3c0a08-0684-45da-ae32-cb9bb1b46d27",
+            "file_name": "hyundai-r215l-smart-maintenance-standard-manual.pdf",
+            "page_number": 2,
+            "section": "MAINTENANCE STANDARD GROUP  1  OPERATIONAL PERFORMANCE TEST",
+            "chunk_id": "8e3c0a08-0684-45da-ae32-cb9bb1b46d27::p2::s2",
+            "snippet": "SECTION  7  MAINTENANCE STANDARD GROUP  1  OPERATIONAL PERFORMANCE TEST\n1. PURPOSE Performance tests are used to check:\nOPERATIONAL PERFORMANCE OF A N..."
+          },
+          {
+            "document_id": "8e3c0a08-0684-45da-ae32-cb9bb1b46d27",
+            "file_name": "hyundai-r215l-smart-maintenance-standard-manual.pdf",
+            "page_number": 2,
+            "section": "MAINTENANCE STANDARD GROUP  1  OPERATIONAL PERFORMANCE TEST",
+            "chunk_id": "8e3c0a08-0684-45da-ae32-cb9bb1b46d27::p2::s2",
+            "snippet": "SECTION  7  MAINTENANCE STANDARD GROUP  1  OPERATIONAL PERFORMANCE TEST\n1. PURPOSE Performance tests are used to check:\nOPERATIONAL PERFORMANCE OF A N..."
+          },
+          {
+            "document_id": "8e3c0a08-0684-45da-ae32-cb9bb1b46d27",
+            "file_name": "hyundai-r215l-smart-maintenance-standard-manual.pdf",
+            "page_number": 4,
+            "section": "MAINTENANCE STANDARD GROUP  1  OPERATIONAL PERFORMANCE TEST",
+            "chunk_id": "8e3c0a08-0684-45da-ae32-cb9bb1b46d27::p4::s6",
+            "snippet": "3. OPERATION FOR PERFORMANCE TESTS\nObserve the following rules in order to carry out performance tests accurately and safely.\nThe machine Repair any d..."
+          },
+          {
+            "document_id": "8e3c0a08-0684-45da-ae32-cb9bb1b46d27",
+            "file_name": "hyundai-r215l-smart-maintenance-standard-manual.pdf",
+            "page_number": 4,
+            "section": "MAINTENANCE STANDARD GROUP  1  OPERATIONAL PERFORMANCE TEST",
+            "chunk_id": "8e3c0a08-0684-45da-ae32-cb9bb1b46d27::p4::s6",
+            "snippet": "3. OPERATION FOR PERFORMANCE TESTS\nObserve the following rules in order to carry out performance tests accurately and safely.\nThe machine Repair any d..."
+          },
+          {
+            "document_id": "8e3c0a08-0684-45da-ae32-cb9bb1b46d27",
+            "file_name": "hyundai-r215l-smart-maintenance-standard-manual.pdf",
+            "page_number": 5,
+            "section": "MAINTENANCE STANDARD GROUP  1  OPERATIONAL PERFORMANCE TEST",
+            "chunk_id": "8e3c0a08-0684-45da-ae32-cb9bb1b46d27::p5::s7",
+            "snippet": "7-4\nENGINE SPEED\nMeasure the engine speed at each power mode The engine speed at each power mode must meet standard RPM; if not, all other operational..."
+          }
+        ],
+        "confidence": "HIGH",
+        "confidence_score": 2.72,
+        "evidence": [
+          {
+            "chunk_id": "8e3c0a08-0684-45da-ae32-cb9bb1b46d27::p2::s2",
+            "content": "SECTION  7  MAINTENANCE STANDARD GROUP  1  OPERATIONAL PERFORMANCE TEST\n1. PURPOSE Performance tests are used to check:\nOPERATIONAL PERFORMANCE OF A NEW MACHINE Whenever a new machine is delivered in parts and reassembled at a customer's site, it must be tested to confirm that the operational performance of the machine meets Hyundai spec.\nOPERATIONAL PERFORMANCE OF A WORKING MACHINE With the passage of time, the machine's operational performance deteriorates, so that the machine needs to be serviced periodically to restore it to its original performance level. Before servicing the machine, conduct performance tests to check the extent of deterioration, and to decide what kind of service needs to be done(by referring to the \"Service Limits\" in this manual).\nOPERATIONAL PERFORMANCE OF A REPAIRED MACHINE After the machine is repaired or serviced, it must be tested to confirm that its operational performance was restored by the repair and/or service work done.\nWorking condition\nOperating\nMaintenance      record\n1)\n2)\n3)\n21077MS01",
+            "page_number": 2,
+            "score": 2.720168113708496
+          },
+          {
+            "chunk_id": "8e3c0a08-0684-45da-ae32-cb9bb1b46d27::p2::s2",
+            "content": "SECTION  7  MAINTENANCE STANDARD GROUP  1  OPERATIONAL PERFORMANCE TEST\n1. PURPOSE Performance tests are used to check:\nOPERATIONAL PERFORMANCE OF A NEW MACHINE Whenever a new machine is delivered in parts and reassembled at a customer's site, it must be tested to confirm that the operational performance of the machine meets Hyundai spec.\nOPERATIONAL PERFORMANCE OF A WORKING MACHINE With the passage of time, the machine's operational performance deteriorates, so that the machine needs to be serviced periodically to restore it to its original performance level. Before servicing the machine, conduct performance tests to check the extent of deterioration, and to decide what kind of service needs to be done(by referring to the \"Service Limits\" in this manual).\nOPERATIONAL PERFORMANCE OF A REPAIRED MACHINE After the machine is repaired or serviced, it must be tested to confirm that its operational performance was restored by the repair and/or service work done.\nWorking condition\nOperating\nMaintenance      record\n1)\n2)\n3)\n21077MS01",
+            "page_number": 2,
+            "score": 2.720168113708496
+          },
+          {
+            "chunk_id": "8e3c0a08-0684-45da-ae32-cb9bb1b46d27::p4::s6",
+            "content": "3. OPERATION FOR PERFORMANCE TESTS\nObserve the following rules in order to carry out performance tests accurately and safely.\nThe machine Repair any defects and damage found, such as oil or water leaks, loose bolts, cracks and so on, before starting to test.\nTest area\nSelect a hard, flat surface. Secure enough space to allow the machine to run straight more than 20 m , and to make a full swing with the front attachment extended. If required, rope off the test area and provide signboards to keep unauthorized personnel away.\nPrecautions\nBefore starting to test, agree upon the signals to be employed for communication among coworkers.   Once the test is started, be sure to communicate with each other using these signals, and to follow them without fail. Operate the machine carefully and always give first priority to safety. While testing, always take care to avoid accidents due to landslides or contact with high voltage power lines.   Always confirm that there is sufficient space for full swings. Avoid polluting the machine and the ground with leaking oil.   Use oil pans to catch escaping oil.   Pay special attention to this when removing hydraulic pipings.\nMake precise measurements\nAccurately calibrate test instruments in advance to obtain correct data. Carry out tests under the exact test conditions prescribed for each test item. Repeat the same test and confirm that the test data obtained can be procured repeatedly.      Use mean values of measurements if necessary.\n1)\n(1)\n(2)\n① ②\n③\n(3)\n(4)\n①\n②\n③\n④\n①\n②\n③\n(210-7)  7-3",
+            "page_number": 4,
+            "score": 0.1381818652153015
+          },
+          {
+            "chunk_id": "8e3c0a08-0684-45da-ae32-cb9bb1b46d27::p4::s6",
+            "content": "3. OPERATION FOR PERFORMANCE TESTS\nObserve the following rules in order to carry out performance tests accurately and safely.\nThe machine Repair any defects and damage found, such as oil or water leaks, loose bolts, cracks and so on, before starting to test.\nTest area\nSelect a hard, flat surface. Secure enough space to allow the machine to run straight more than 20 m , and to make a full swing with the front attachment extended. If required, rope off the test area and provide signboards to keep unauthorized personnel away.\nPrecautions\nBefore starting to test, agree upon the signals to be employed for communication among coworkers.   Once the test is started, be sure to communicate with each other using these signals, and to follow them without fail. Operate the machine carefully and always give first priority to safety. While testing, always take care to avoid accidents due to landslides or contact with high voltage power lines.   Always confirm that there is sufficient space for full swings. Avoid polluting the machine and the ground with leaking oil.   Use oil pans to catch escaping oil.   Pay special attention to this when removing hydraulic pipings.\nMake precise measurements\nAccurately calibrate test instruments in advance to obtain correct data. Carry out tests under the exact test conditions prescribed for each test item. Repeat the same test and confirm that the test data obtained can be procured repeatedly.      Use mean values of measurements if necessary.\n1)\n(1)\n(2)\n① ②\n③\n(3)\n(4)\n①\n②\n③\n④\n①\n②\n③\n(210-7)  7-3",
+            "page_number": 4,
+            "score": -0.2207309603691101
+          },
+          {
+            "chunk_id": "8e3c0a08-0684-45da-ae32-cb9bb1b46d27::p5::s7",
+            "content": "7-4\nENGINE SPEED\nMeasure the engine speed at each power mode The engine speed at each power mode must meet standard RPM; if not, all other operational performance data will be unreliable.   It is essential to perform this test first.\nPreparation\nWarm up the machine, until the engine coolant temperature reaches 50 。 C or more, and the hydraulic oil is 50 ± 5 。 C. Set the accel dial at 10(Max) position. Push the H-mode switch and confirm that the fuel injection pump governor lever comes into contact with the high-idle stopper. Measure the engine RPM.\nMeasurement\nStart the engine.   The engine will run at start idle speed.   Measure engine speed with a tachometer. Measure and record the engine speed at each mode(H, S). Select the H-mode. Lightly operate the bucket control lever a few times, then return the control lever to neutral; The engine will automatically enter   the   auto-idle speed after 4 seconds. Measure and record the auto deceleration speed.\n2)\n(1)\n※\n(2)\n(3)\n①\n②\n③ ④\n⑤\n①\n② ③\n④\nEvaluation The measured speeds should meet the following specifications. (4)\nModel\nR21 5L\nEngine speed\nStart idle\nH mode\nS mode\nAuto decel\nStandard\n1000 ± 100\n2050 ± 50\n1750 ± 50\n1200 ± 100\nRemarks\nUnit :  rpm\nCondition : Set the accel dial at 10(Max) position.",
+            "page_number": 5,
+            "score": -0.7965061664581299
+          }
+        ],
+        "sources": [
+          {
+            "document_id": "8e3c0a08-0684-45da-ae32-cb9bb1b46d27",
+            "file_name": "hyundai-r215l-smart-maintenance-standard-manual.pdf",
+            "page_number": 2
+          },
+          {
+            "document_id": "8e3c0a08-0684-45da-ae32-cb9bb1b46d27",
+            "file_name": "hyundai-r215l-smart-maintenance-standard-manual.pdf",
+            "page_number": 4
+          },
+          {
+            "document_id": "8e3c0a08-0684-45da-ae32-cb9bb1b46d27",
+            "file_name": "hyundai-r215l-smart-maintenance-standard-manual.pdf",
+            "page_number": 5
+          }
+        ],
+        "images": [],
+        "tables": [],
+        "pages": [
+          2,
+          4,
+          5
+        ],
+        "retrieval_trace": {
+          "intent": "MAINTENANCE",
+          "strategy": "dense+bm25_rrf_rerank_hierarchical",
+          "dense_count": 10,
+          "bm25_count": 10,
+          "graph_count": 0,
+          "fused_count": 18,
+          "final_count": 5,
+          "evidence_coverage": "COMPLETE",
+          "answerable": true,
+          "entities_required": [],
+          "entities_found": [],
+          "retrieval_strategy": "dense+bm25_rrf_rerank_hierarchical",
+          "evidence_count": 5,
+          "relationship_supported": true,
+          "inferred_only": false,
+          "reason": "Retrieved evidence available for general query.",
+          "context_char_count": 4280,
+          "context_chunks_count": 3,
+          "context_truncated": false,
+          "max_context_chars": 14000,
+          "source_manuals": [
+            "hyundai-r215l-smart-maintenance-standard-manual.pdf"
+          ],
+          "latency_ms": 78977
+        },
+        "verification_status": "SUPPORTED",
+        "trace_id": "tr_62d7feb63666",
+        "retrieval_strategy": "dense+bm25_rrf_rerank_hierarchical",
+        "latency_ms": 78977
+      }
+order: 1000

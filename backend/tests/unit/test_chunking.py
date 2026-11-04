@@ -58,3 +58,33 @@ def test_chunking_deterministic_table_ids():
     assert table_chunks1[0].tenant_id == "tenant_a"
     assert table_chunks1[0].content_hash is not None
     assert "Page 1" in table_chunks1[0].context_prefix
+
+
+def test_table_title_is_kept_with_rows_and_units():
+    chunker = ChunkingService()
+    chunks, _ = chunker.chunk(
+        {
+            "pages": [{
+                "page_num": 5,
+                "text_blocks": [],
+                "tables": [{
+                    "title": "ELECTRIC COMPONENTS MOUNTING 1",
+                    "markdown": (
+                        "| Item | Size | kgf.m | lbf.ft |\n"
+                        "|---|---|---|---|\n"
+                        "| 4 | M12 x 1.75 | 12.8 +/- 3.0 | 92.6 +/- 21.7 |"
+                    ),
+                    "bbox": [10, 20, 200, 100],
+                }],
+                "figures": [],
+            }]
+        },
+        uuid4(),
+        filename="torque.pdf",
+    )
+
+    table_chunk = next(chunk for chunk in chunks if chunk.chunk_type.value == "TABLE")
+    assert "ELECTRIC COMPONENTS MOUNTING 1" in table_chunk.content
+    assert "M12 x 1.75" in table_chunk.content
+    assert "kgf.m" in table_chunk.content
+    assert "lbf.ft" in table_chunk.content

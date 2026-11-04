@@ -11,6 +11,8 @@ class GroundednessResult(BaseModel):
     verification_status: str  # "SUPPORTED" | "PARTIALLY_SUPPORTED" | "UNSUPPORTED"
     score: float
     reason: str
+    supported_chunk_ids: list[str] = []
+    supported_sentences: list[str] = []
 
 
 class GroundednessVerificationService:
@@ -30,26 +32,72 @@ class GroundednessVerificationService:
                 reason="No evidence available to ground the answer.",
             )
 
-        if "no relevant evidence" in answer.lower() or "insufficient evidence" in answer.lower():
+        normalized_answer = re.sub(r"\s+", " ", answer.lower()).strip()
+        if normalized_answer in {
+            "no relevant evidence was found to answer your question.",
+            "the provided evidence does not contain enough information to answer this question.",
+            "i don't have enough verified information in the knowledge base to answer this question.",
+        }:
             return GroundednessResult(
                 verification_status="SUPPORTED",
                 score=1.0,
                 reason="System correctly acknowledged lack of evidence.",
             )
 
-        # Word overlap verification between answer and evidence text
-        evidence_text = " ".join(item.content.lower() for item in evidence)
-        answer_words = [w for w in re.findall(r"\w+", answer.lower()) if len(w) > 3]
+        stop_words = {
+            "also", "that", "this", "with", "from", "into", "than", "then",
+            "when", "where", "which", "their", "there", "they", "them",
+            "does", "have", "been", "were", "will", "would", "should",
+            "about", "covers", "cover", "section", "system",
+        }
+        sentences = [
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?])\s+|\n+", answer)
+            if sentence.strip()
+        ]
+        if not sentences:
+            return GroundednessResult(
+                verification_status="UNSUPPORTED",
+                score=0.0,
+                reason="No verifiable answer claims were found.",
+            )
 
-        if not answer_words:
-            return GroundednessResult(verification_status="SUPPORTED", score=1.0, reason="Short answer")
+        sentence_scores: list[float] = []
+        supported_chunk_ids: set[str] = set()
+        supported_sentences: list[str] = []
+        unsupported_sentences: list[str] = []
+        for sentence in sentences:
+            terms = {
+                word for word in re.findall(r"\w+", sentence.lower())
+                if len(word) > 3 and word not in stop_words
+            }
+            if not terms:
+                unsupported_sentences.append(sentence)
+                sentence_scores.append(0.0)
+                continue
 
-        matches = sum(1 for w in answer_words if w in evidence_text)
-        overlap_ratio = matches / len(answer_words)
+            best_score = 0.0
+            best_chunks: list[SearchResult] = []
+            for item in evidence:
+                evidence_terms = set(re.findall(r"\w+", item.content.lower()))
+                score = len(terms & evidence_terms) / len(terms)
+                if score > best_score:
+                    best_score = score
+                    best_chunks = [item]
+                elif score == best_score and score > 0:
+                    best_chunks.append(item)
 
-        if overlap_ratio >= 0.6:
+            sentence_scores.append(best_score)
+            if best_score >= 0.75:
+                supported_chunk_ids.update(item.chunk_id for item in best_chunks)
+                supported_sentences.append(sentence)
+            else:
+                unsupported_sentences.append(sentence)
+
+        overlap_ratio = sum(sentence_scores) / len(sentence_scores)
+        if not unsupported_sentences:
             status = "SUPPORTED"
-        elif overlap_ratio >= 0.35:
+        elif supported_chunk_ids:
             status = "PARTIALLY_SUPPORTED"
         else:
             status = "UNSUPPORTED"
@@ -57,5 +105,11 @@ class GroundednessVerificationService:
         return GroundednessResult(
             verification_status=status,
             score=round(overlap_ratio, 2),
-            reason=f"Word overlap grounding score: {overlap_ratio:.2f}",
+            reason=(
+                f"{len(sentences) - len(unsupported_sentences)} of {len(sentences)} answer claims "
+                f"matched individual evidence chunks; {len(unsupported_sentences)} claim(s) lack "
+                "sufficient support."
+            ),
+            supported_chunk_ids=sorted(supported_chunk_ids),
+            supported_sentences=supported_sentences,
         )

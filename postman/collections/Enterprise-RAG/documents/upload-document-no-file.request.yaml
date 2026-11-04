@@ -1,0 +1,23 @@
+$kind: http-request
+name: Upload Document - No File (Error Case)
+description: ""
+method: POST
+url: "{{base_url}}/api/v1/documents"
+order: 4000
+headers:
+  X-Tenant-ID: "{{tenant_id}}"
+  X-Assistant-ID: "{{assistant_id}}"
+  X-Knowledge-Base-ID: "{{knowledge_base_id}}"
+body:
+  type: formdata
+  content:
+    - type: text
+      key: industry
+      value: manufacturing
+scripts:
+  - type: afterResponse
+    code: |-
+      pm.test("Status is 422 Unprocessable Entity", () => {
+          pm.expect(pm.response.code).to.be.oneOf([400, 422]);
+      });
+    language: text/javascript

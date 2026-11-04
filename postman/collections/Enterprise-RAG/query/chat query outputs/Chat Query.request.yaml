@@ -1,0 +1,56 @@
+$kind: http-request
+description: ""
+url: "{{base_url}}/api/v1/chat"
+method: POST
+headers:
+  X-Tenant-ID: "{{tenant_id}}"
+  X-Assistant-ID: "{{assistant_id}}"
+  X-Knowledge-Base-ID: "{{knowledge_base_id}}"
+body:
+  type: json
+  content: |-
+    {
+      "query": "What does the manual state about pump device composition?",
+      "top_k": 5,
+      "retrieval_profile": "default"
+    }
+auth:
+  type: bearer
+  credentials:
+    token: "{{api_token}}"
+scripts:
+  - type: afterResponse
+    code: |-
+      pm.test("Status is 200", () => pm.response.to.have.status(200));
+      pm.test("Has answer field", () => {
+          const json = pm.response.json();
+          pm.expect(json).to.have.property("answer");
+          pm.expect(json.answer).to.be.a("string").and.not.empty;
+      });
+      pm.test("Has trace_id", () => {
+          const json = pm.response.json();
+          pm.expect(json).to.have.property("trace_id");
+      });
+      pm.test("Has valid confidence level", () => {
+          const json = pm.response.json();
+          pm.expect(["HIGH", "MEDIUM", "LOW"]).to.include(json.confidence);
+      });
+      pm.test("Has valid verification_status", () => {
+          const json = pm.response.json();
+          pm.expect(["SUPPORTED", "PARTIALLY_SUPPORTED", "UNSUPPORTED"]).to.include(json.verification_status);
+      });
+      pm.test("Citations is an array", () => {
+          const json = pm.response.json();
+          pm.expect(json.citations).to.be.an("array");
+      });
+      pm.test("Response time under 30000ms", () => {
+          pm.expect(pm.response.responseTime).to.be.below(30000);
+      });
+    language: text/javascript
+settings:
+  protocolVersion: auto
+  strictSSL: false
+  followRedirects: true
+  disableCookies: false
+  maxResponseSize: 52428800
+order: 1000

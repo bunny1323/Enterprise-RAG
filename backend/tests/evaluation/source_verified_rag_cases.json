@@ -1,0 +1,64 @@
+[
+  {
+    "case_id": "HYU-SECTION-003",
+    "question": "What does Section 3 cover?",
+    "source_file_pattern": "*hyundai-r215l-smart-foreword-manual.pdf",
+    "source_page": 1,
+    "expected_supported_facts": [
+      "Section 3 is the Hydraulic System.",
+      "It explains the hydraulic circuit and single and combined operation."
+    ],
+    "expected_answerability": "answerable only from evidence explicitly identifying Section 3",
+    "verified_from_pdf": true
+  },
+  {
+    "case_id": "HYU-TORQUE-TABLE-005",
+    "question": "What is the tightening torque for M12x1.75 fasteners in the electric components mounting table?",
+    "source_file_pattern": "*hyundai-r215l-smart-component-mounting-torque-manual.pdf",
+    "source_page": 5,
+    "expected_supported_facts": [
+      "The electric components mounting table labels the row item 4, size M12 x 1.75.",
+      "The source reports 12.8 +/- 3.0 kgf.m and 92.6 +/- 21.7 lbf.ft."
+    ],
+    "expected_answerability": "answerable only if the table heading, row, and units are retained together",
+    "verified_from_pdf": true
+  },
+  {
+    "case_id": "HYU-CROSS-MANUAL-HYD-CAPO",
+    "question": "Compare how the hydraulic circuit moves oil with how the mechatronics CAPO system controls engine and pump power.",
+    "sources": [
+      {
+        "source_file_pattern": "*hyundai-r215l-smart-hydraulic-system-manual.pdf",
+        "source_page": 3,
+        "supported_fact": "The main circuit includes suction, delivery, return, and drain circuits; pump discharge flows through the control valve to actuators."
+      },
+      {
+        "source_file_pattern": "*hyundai-r215l-smart-mechatronics-system-manual.pdf",
+        "source_page": 2,
+        "supported_fact": "CAPO controls engine and pump mutual power for the selected work mode and monitors machine conditions."
+      }
+    ],
+    "expected_answerability": "both manual passages must be present; claims must remain attributed to their respective source",
+    "verified_from_pdf": true
+  },
+  {
+    "case_id": "HYU-UNSUPPORTED-ECU-PASSWORD",
+    "question": "What is the ECU administrator password?",
+    "sources": [],
+    "expected_supported_facts": [],
+    "expected_answerability": "abstain unless a retrieved source explicitly documents this credential",
+    "verified_from_pdf": false,
+    "note": "Absence has not been exhaustively verified across every manual; use only as a live abstention probe, not as a gold negative."
+  },
+  {
+    "case_id": "HYU-LIST-SECTIONS",
+    "question": "List all the sections of the machine.",
+    "source_file_pattern": "*hyundai-r215l-smart-foreword-manual.pdf",
+    "source_page": 1,
+    "expected_supported_facts": [
+      "The foreword page lists document sections and their scopes."
+    ],
+    "expected_answerability": "list intent required; do not claim completeness unless all requested entries are present in retrieved evidence",
+    "verified_from_pdf": true
+  }
+]

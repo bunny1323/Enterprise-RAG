@@ -1,0 +1,21 @@
+$kind: http-request
+name: 'Get Document Status - Invalid UUID (Error Case)'
+method: GET
+url: '{{base_url}}/api/v1/documents/not-a-valid-uuid/status'
+order: 6000
+headers:
+  - key: X-Tenant-ID
+    value: '{{tenant_id}}'
+  - key: X-Assistant-ID
+    value: '{{assistant_id}}'
+  - key: X-Knowledge-Base-ID
+    value: '{{knowledge_base_id}}'
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("Status is 400 Bad Request", () => pm.response.to.have.status(400));
+      pm.test("Error message mentions invalid format", () => {
+          const json = pm.response.json();
+          pm.expect(json.detail).to.be.a("string");
+      });

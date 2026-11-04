@@ -1,0 +1,28 @@
+$kind: http-request
+name: Get Document Status
+method: GET
+url: '{{base_url}}/api/v1/documents/{{document_id}}/status'
+order: 5000
+headers:
+  - key: X-Tenant-ID
+    value: '{{tenant_id}}'
+  - key: X-Assistant-ID
+    value: '{{assistant_id}}'
+  - key: X-Knowledge-Base-ID
+    value: '{{knowledge_base_id}}'
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("Status is 200", () => pm.response.to.have.status(200));
+      pm.test("Has valid status field", () => {
+          const json = pm.response.json();
+          pm.expect(json).to.have.property("status");
+          pm.expect(["PENDING", "PROCESSING", "COMPLETED", "FAILED", "CANCELLED"]).to.include(json.status);
+      });
+      pm.test("Has progress_percent", () => {
+          const json = pm.response.json();
+          pm.expect(json).to.have.property("progress_percent");
+          pm.expect(json.progress_percent).to.be.a("number");
+          pm.expect(json.progress_percent).to.be.within(0, 100);
+      });

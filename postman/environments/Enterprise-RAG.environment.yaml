@@ -1,0 +1,16 @@
+name: Enterprise-RAG
+values:
+  - key: base_url
+    value: 'http://127.0.0.1:8001'
+  - key: api_token
+    value: ''
+  - key: tenant_id
+    value: default
+  - key: assistant_id
+    value: default
+  - key: knowledge_base_id
+    value: default
+  - key: document_id
+    value: ''
+  - key: job_id
+    value: ''

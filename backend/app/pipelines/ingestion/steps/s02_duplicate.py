@@ -42,16 +42,22 @@ async def step(state: IngestionState, services: dict[str, Any]) -> IngestionStat
     if existing_row is not None:
         return await _mark_as_exact_duplicate(state, postgres, sha256, UUID(str(existing_row["id"])))
 
-    # ── 3. Handle Incomplete / Stale Document Overlap (FAILED, TIMEOUT, etc.) ─
-    # Neutralize sha256 on any previous non-completed documents so this fresh attempt can succeed
+    # ── 3. Handle Incomplete / Stale / Corrupted Document Overlap ────────────
+    # Neutralize sha256 on any previous non-completed documents or completed documents
+    # with 0 chunks, so this fresh attempt can succeed without unique constraint violation.
     await postgres.execute(
         """
         UPDATE documents
-        SET sha256 = sha256 || '_inactive_' || id::text
+        SET sha256 = sha256 || '_inactive_' || id::text,
+            status = CASE WHEN status = 'COMPLETED' THEN 'FAILED' ELSE status END,
+            error_message = CASE WHEN status = 'COMPLETED' THEN 'Corrupted canonical document with 0 chunks superseded by retry' ELSE error_message END
         WHERE sha256 = $1
           AND tenant_id = $2
           AND id != $3
-          AND status != 'COMPLETED'
+          AND (
+            status != 'COMPLETED'
+            OR id NOT IN (SELECT DISTINCT document_id FROM chunks WHERE document_id IS NOT NULL)
+          )
         """,
         sha256,
         state.tenant_id,
@@ -97,6 +103,8 @@ async def step(state: IngestionState, services: dict[str, Any]) -> IngestionStat
 async def _mark_as_exact_duplicate(
     state: IngestionState, postgres: PostgresClient, sha256: str, canonical_id: UUID
 ) -> IngestionState:
+    from datetime import datetime, timezone
+
     logger.info(
         "step.duplicate.exact_found",
         sha256=sha256[:16] + "...",
@@ -107,6 +115,7 @@ async def _mark_as_exact_duplicate(
     # the canonical document already owns the exact sha256 value. The
     # canonical_document_id column is the authoritative duplicate reference.
     dup_sha256 = f"{sha256}_dup_{state.document_id}"
+    now = datetime.now(timezone.utc)
 
     await postgres.execute(
         """
@@ -114,12 +123,14 @@ async def _mark_as_exact_duplicate(
         SET sha256                = $1,
             status                = $2,
             canonical_document_id = $3,
-            progress_percent      = 100
-        WHERE id = $4
+            progress_percent      = 100,
+            completed_at          = $4
+        WHERE id = $5
         """,
         dup_sha256,
         DocumentStatus.DUPLICATE.value,
         canonical_id,
+        now,
         state.document_id,
     )
 
@@ -128,10 +139,12 @@ async def _mark_as_exact_duplicate(
             """
             UPDATE ingestion_jobs
             SET status           = $1,
-                progress_percent = 100
-            WHERE job_id = $2
+                progress_percent = 100,
+                completed_at     = $2
+            WHERE job_id = $3
             """,
             JobStatus.DUPLICATE.value,
+            now,
             state.job_id,
         )
 
@@ -142,6 +155,7 @@ async def _mark_as_exact_duplicate(
             "dup_classification": "EXACT_DUP",
             "canonical_document_id": canonical_id,
             "progress_percent": 100,
+            "completed_at": now,
         }
     )
 

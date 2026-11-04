@@ -1,0 +1,29 @@
+$kind: http-request
+name: RAG Debug
+method: POST
+url: '{{base_url}}/api/v1/rag/debug'
+order: 13000
+headers:
+  - key: X-Tenant-ID
+    value: '{{tenant_id}}'
+  - key: X-Assistant-ID
+    value: '{{assistant_id}}'
+  - key: X-Knowledge-Base-ID
+    value: '{{knowledge_base_id}}'
+body:
+  type: json
+  content: |-
+    {
+      "query": "What are the maintenance intervals?",
+      "top_k": 5,
+      "retrieval_profile": "default"
+    }
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("Status is 200", () => pm.response.to.have.status(200));
+      pm.test("Has retrieval_trace for debugging", () => {
+          const json = pm.response.json();
+          pm.expect(json).to.have.property("retrieval_trace");
+      });

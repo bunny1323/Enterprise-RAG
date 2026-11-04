@@ -114,7 +114,7 @@ async def get_document_status(
 
     row = await postgres.fetchrow(
         """
-        SELECT id, status, progress_percent, created_at, completed_at, error_message
+        SELECT id, status, progress_percent, created_at, completed_at, error_message, canonical_document_id
         FROM documents
         WHERE id = $1 AND tenant_id = $2 AND knowledge_base_id = $3
         """,
@@ -129,13 +129,27 @@ async def get_document_status(
             detail=f"Document {document_id} not found",
         )
 
+    is_dup = row["status"] == "DUPLICATE"
+    canonical_id = row.get("canonical_document_id")
+    completed_at = row.get("completed_at")
+
+    if is_dup and canonical_id and not completed_at:
+        canonical_row = await postgres.fetchrow(
+            "SELECT completed_at FROM documents WHERE id = $1",
+            canonical_id,
+        )
+        if canonical_row:
+            completed_at = canonical_row.get("completed_at")
+
     return DocumentStatusResponse(
         document_id=row["id"],
         status=row["status"],
         progress_percent=row["progress_percent"],
         created_at=row["created_at"],
-        completed_at=row.get("completed_at"),
+        completed_at=completed_at,
         error_message=row.get("error_message"),
+        canonical_document_id=canonical_id,
+        is_duplicate=is_dup,
     )
 
 

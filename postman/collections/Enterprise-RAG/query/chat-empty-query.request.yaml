@@ -1,0 +1,26 @@
+$kind: http-request
+name: 'Chat Query - Empty Query (Error Case)'
+method: POST
+url: '{{base_url}}/api/v1/chat'
+order: 11000
+headers:
+  - key: X-Tenant-ID
+    value: '{{tenant_id}}'
+  - key: X-Assistant-ID
+    value: '{{assistant_id}}'
+  - key: X-Knowledge-Base-ID
+    value: '{{knowledge_base_id}}'
+body:
+  type: json
+  content: |-
+    {
+      "query": "",
+      "top_k": 5
+    }
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("Status is 422 Unprocessable Entity", () => {
+          pm.expect(pm.response.code).to.be.oneOf([400, 422]);
+      });

@@ -73,6 +73,34 @@ class TestCitationAudit:
         citations, _ = svc.map_citations("Torque spec is 120 Nm.", evidence)
         assert citations[0].section == "Section 9"
 
+    def test_citation_filter_uses_only_verified_supporting_chunks(self):
+        svc = CitationService()
+        evidence = [
+            SearchResult(
+                chunk_id="supported",
+                content="Section 3 is the Hydraulic System.",
+                page_number=1,
+                document_id="doc-a",
+                file_name="foreword.pdf",
+            ),
+            SearchResult(
+                chunk_id="unrelated",
+                content="Section 9 lists torque tables.",
+                page_number=3,
+                document_id="doc-b",
+                file_name="torque.pdf",
+            ),
+        ]
+
+        citations, sources = svc.map_citations(
+            "Section 3 is the Hydraulic System.",
+            evidence,
+            supporting_chunk_ids={"supported"},
+        )
+
+        assert [citation.chunk_id for citation in citations] == ["supported"]
+        assert [source.file_name for source in sources] == ["foreword.pdf"]
+
     def test_coverage_count_query_generalized_sections(self):
         """Verify COUNT_QUERY works with non-Hyundai section numbers and titles."""
         norm_svc = QueryNormalizationService()
@@ -97,8 +125,8 @@ class TestCitationAudit:
         assert res.answerable is True
         assert res.coverage_status == "COMPLETE"
 
-    def test_coverage_list_query_without_hardcoded_sections(self):
-        """Verify LIST_QUERY handles arbitrary sections without requiring range(1, 10)."""
+    def test_coverage_list_query_does_not_claim_complete_from_one_section(self):
+        """One arbitrary section header must not establish the complete section list."""
         norm_svc = QueryNormalizationService()
         cov_svc = EvidenceCoverageService()
 
@@ -120,8 +148,8 @@ class TestCitationAudit:
             )
         ]
         res = cov_svc.evaluate_coverage(norm, evidence)
-        assert res.answerable is True
-        assert res.coverage_status == "COMPLETE"
+        assert res.answerable is False
+        assert res.coverage_status == "PARTIAL"
 
     def test_coverage_page_number_format_without_hardcoded_notation(self):
         """Verify PAGE_NUMBER_FORMAT handles custom notations without falling back to '2-3'."""

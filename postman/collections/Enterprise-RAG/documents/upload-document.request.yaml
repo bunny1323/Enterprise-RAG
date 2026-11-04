@@ -1,0 +1,41 @@
+$kind: http-request
+name: Upload Document
+method: POST
+url: '{{base_url}}/api/v1/documents'
+order: 3000
+headers:
+  - key: X-Tenant-ID
+    value: '{{tenant_id}}'
+  - key: X-Assistant-ID
+    value: '{{assistant_id}}'
+  - key: X-Knowledge-Base-ID
+    value: '{{knowledge_base_id}}'
+body:
+  type: formdata
+  content:
+    - key: file
+      type: file
+      src: test_manual.pdf
+    - key: industry
+      type: text
+      value: manufacturing
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("Status is 202 Accepted", () => pm.response.to.have.status(202));
+      pm.test("Returns document_id", () => {
+          const json = pm.response.json();
+          pm.expect(json).to.have.property("document_id");
+          pm.expect(json.document_id).to.be.a("string").and.not.empty;
+          // Save for downstream requests
+          pm.environment.set("document_id", json.document_id);
+      });
+      pm.test("Returns job_id", () => {
+          const json = pm.response.json();
+          pm.expect(json).to.have.property("job_id");
+          pm.environment.set("job_id", json.job_id);
+      });
+      pm.test("Response time under 2000ms", () => {
+          pm.expect(pm.response.responseTime).to.be.below(2000);
+      });

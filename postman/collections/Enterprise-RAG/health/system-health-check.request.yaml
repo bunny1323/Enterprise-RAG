@@ -1,0 +1,30 @@
+$kind: http-request
+name: System Health Check
+method: GET
+url: '{{base_url}}/api/v1/health'
+order: 2000
+headers:
+  - key: X-Tenant-ID
+    value: '{{tenant_id}}'
+  - key: X-Assistant-ID
+    value: '{{assistant_id}}'
+  - key: X-Knowledge-Base-ID
+    value: '{{knowledge_base_id}}'
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("Status is 200", () => pm.response.to.have.status(200));
+      pm.test("Response has status field", () => {
+          const json = pm.response.json();
+          pm.expect(json).to.have.property("status");
+          pm.expect(["healthy", "degraded"]).to.include(json.status);
+      });
+      pm.test("Response has services object", () => {
+          const json = pm.response.json();
+          pm.expect(json).to.have.property("services");
+          pm.expect(json.services).to.be.an("object");
+      });
+      pm.test("Response time is under 5000ms", () => {
+          pm.expect(pm.response.responseTime).to.be.below(5000);
+      });

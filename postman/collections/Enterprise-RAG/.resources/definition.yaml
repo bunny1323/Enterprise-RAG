@@ -1,0 +1,23 @@
+$kind: collection
+name: Enterprise-RAG API
+description: 'API collection for the Enterprise-RAG backend — document ingestion, querying, job management, and health checks.'
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+variables:
+  - key: base_url
+    value: 'http://localhost:8001'
+  - key: tenant_id
+    value: ''
+  - key: assistant_id
+    value: ''
+  - key: knowledge_base_id
+    value: ''
+  - key: api_token
+    value: ''
+  - key: document_id
+    value: ''
+  - key: job_id
+    value: ''

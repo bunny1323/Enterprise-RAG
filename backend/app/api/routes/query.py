@@ -7,6 +7,7 @@ POST /api/v1/rag/debug — RAG pipeline debug endpoint
 
 import time
 import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request, status
 
@@ -21,8 +22,6 @@ from app.api.dependencies import (
     SettingsDep,
     TenantContextDep,
 )
-from pathlib import Path
-
 from app.config.logging import get_logger
 from app.infrastructure.redis.client import RedisClient
 from app.models.query import (
@@ -31,8 +30,8 @@ from app.models.query import (
     QueryRequest,
     QueryResponse,
 )
-from app.services.cache.service import CacheService
 from app.services.cache.semantic import SemanticCacheService
+from app.services.cache.service import CacheService
 from app.services.confidence.service import ConfidenceScoringService
 from app.services.embeddings.service import EmbeddingService
 from app.services.generation.citations import CitationService
@@ -414,6 +413,7 @@ async def rag_debug(
         },
         "source_ids": [r.chunk_id for r in retrieved_state.reranked_results],
         "page_numbers": list({r.page_number for r in retrieved_state.reranked_results if r.page_number}),
+        "retrieval_diagnostics": retrieved_state.retrieval_diagnostics,
         "confidence": retrieved_state.confidence_level,
         "confidence_score": retrieved_state.confidence_score,
         "retrieval_latency_ms": latency_ms,
@@ -433,71 +433,20 @@ async def trace_retrieval(
     postgres: PostgresDep,
 ) -> dict:
     try:
-        start_time = time.time()
-        
         redis_client: RedisClient | None = getattr(request.app.state, "redis", None)
         cache_svc = CacheService(redis_client, postgres) if redis_client else None
         retrieval_agent = _build_retrieval_agent(request, postgres, cache_svc)
-        
-        # 1. Normalization
+
         norm = retrieval_agent._normalizer.normalize(q)
-        
-        # 2. Embedding
-        query_vec = None
-        if cache_svc:
-            query_vec = await cache_svc.get_query_embedding(tenant_ctx, norm.clean_query)
-        if not query_vec:
-            import asyncio
-            loop = asyncio.get_running_loop()
-            query_vectors = await loop.run_in_executor(None, retrieval_agent._embedder.embed_batch, [norm.clean_query])
-            query_vec = query_vectors[0] if query_vectors else []
-            
-        # 3. Dense & BM25
-        dense_res = await retrieval_agent._dense_svc.search(
-            query_vector=query_vec, top_k=10, tenant_id=tenant_ctx.tenant_id, knowledge_base_id=tenant_ctx.knowledge_base_id
+        retrieved_state = await retrieval_agent.retrieve(
+            QueryState(query=q, tenant_context=tenant_ctx, top_k=10)
         )
-        bm25_res = await retrieval_agent._bm25_svc.search(
-            query_text=norm.clean_query, top_k=10, tenant_id=tenant_ctx.tenant_id, knowledge_base_id=tenant_ctx.knowledge_base_id
-        )
-        
-        # Morph & Typo
-        _retrieval_q = norm.retrieval_query or norm.clean_query
-        _has_morph = _retrieval_q.lower() != norm.clean_query.lower()
-        bm25_morph_res = await retrieval_agent._bm25_svc.search(query_text=_retrieval_q, top_k=10, tenant_id=tenant_ctx.tenant_id, knowledge_base_id=tenant_ctx.knowledge_base_id) if _has_morph else []
-        
-        _typo_q = norm.typo_query or norm.clean_query
-        _has_typo = _typo_q.lower() != norm.clean_query.lower() and _typo_q.lower() != _retrieval_q.lower()
-        bm25_typo_res = await retrieval_agent._bm25_svc.search(query_text=_typo_q, top_k=10, tenant_id=tenant_ctx.tenant_id, knowledge_base_id=tenant_ctx.knowledge_base_id) if _has_typo else []
-        
-        channel_results = [r for r in [dense_res, bm25_res, bm25_morph_res, bm25_typo_res] if r]
-        from app.utils.fusion import reciprocal_rank_fusion
-        fused_res = reciprocal_rank_fusion(channel_results, k=60)
-        
-        reranked_res = await retrieval_agent._reranker.rerank(
-            query=norm.clean_query,
-            candidates=fused_res,
-            top_n=10
-        )
-        
-        # Direct search for words
-        client = request.app.state.weaviate
-        collection = client._require_client().collections.get("DocumentChunk")
-        raw_search = collection.query.bm25(
-            query=norm.clean_query,
-            limit=5,
-            return_properties=["chunk_id", "document_id", "content", "section", "page_number", "file_name"]
-        )
-        raw_objects = []
-        for o in raw_search.objects:
-            raw_objects.append({
-                "chunk_id": o.properties.get("chunk_id"),
-                "content": o.properties.get("content", "")[:300]
-            })
-            
+        diagnostics = retrieved_state.retrieval_diagnostics
+        channels = diagnostics.get("channels", {})
         from app.services.generation.llm import get_context_summary
         from app.services.retrieval.coverage import EvidenceCoverageService
-        cov = EvidenceCoverageService().evaluate_coverage(norm, reranked_res)
-        ctx_summary = get_context_summary(reranked_res)
+        cov = EvidenceCoverageService().evaluate_coverage(norm, retrieved_state.reranked_results)
+        ctx_summary = get_context_summary(retrieved_state.reranked_results)
 
         return {
             "norm": {
@@ -507,23 +456,25 @@ async def trace_retrieval(
                 "typo": norm.typo_query,
                 "intent": norm.intent,
             },
-            "dense": [r.model_dump() for r in dense_res],
-            "bm25": [r.model_dump() for r in bm25_res],
-            "bm25_morph": [r.model_dump() for r in bm25_morph_res],
-            "bm25_typo": [r.model_dump() for r in bm25_typo_res],
-            "rrf": [r.model_dump() for r in fused_res],
-            "reranked": [r.model_dump() for r in reranked_res],
+            "dense": channels.get("dense", []),
+            "bm25": channels.get("bm25", []),
+            "bm25_morph": channels.get("bm25_morph", []),
+            "bm25_typo": channels.get("bm25_typo", []),
+            "rrf": diagnostics.get("fused_candidates", []),
+            "reranked": diagnostics.get("reranked_candidates", []),
+            "selected_evidence": diagnostics.get("selected_evidence", []),
+            "retrieval_diagnostics": diagnostics,
             "context_summary": ctx_summary,
             "coverage": {
                 "answerable": cov.answerable,
                 "coverage_status": cov.coverage_status,
                 "reason": cov.reason,
             },
-            "direct_search": raw_objects,
+            "direct_search": None,
         }
     except Exception as e:
-        import traceback
-        return {"error": str(e), "traceback": traceback.format_exc()}
+        logger.error("query.trace_failed", error=str(e), tenant=tenant_ctx.tenant_id)
+        return {"error": "Retrieval trace failed."}
 
 
 from pydantic import BaseModel, Field
@@ -556,8 +507,8 @@ async def submit_feedback(body: FeedbackRequest) -> dict:
 )
 async def get_evaluation_metrics() -> dict:
     """Return latest recorded RAGAS evaluation metrics if available, or clearly indicate unrecorded."""
-    from pathlib import Path
     import json
+    from pathlib import Path
     eval_path = Path("data/evaluations/latest.json")
     if eval_path.exists():
         try:

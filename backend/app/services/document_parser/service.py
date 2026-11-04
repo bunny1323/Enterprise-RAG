@@ -9,6 +9,7 @@ Extracts structured content from PDFs:
 import asyncio
 import multiprocessing as mp
 import queue
+import re
 import tempfile
 import time
 from enum import Enum
@@ -144,8 +145,17 @@ def _run_docling_in_process_queue(file_path: str, profile: str, result_queue: mp
                     md = item.export_to_markdown()
                 except Exception:
                     md = str(item)
+                try:
+                    title = item.caption_text(doc) or ""
+                except Exception:
+                    title = ""
                 bbox = _extract_bbox(item)
-                _get_page(page_num)["tables"].append({"markdown": md, "bbox": bbox, "page_num": page_num})
+                _get_page(page_num)["tables"].append({
+                    "title": title,
+                    "markdown": md,
+                    "bbox": bbox,
+                    "page_num": page_num,
+                })
 
             elif item_type == "PictureItem":
                 stats["vision_pages"].add(page_num)
@@ -334,7 +344,11 @@ class DocumentParserService:
                     "caption": "Rendered vector content",
                 })
 
-            pages.append({"page_num": page_num, "text_blocks": text_blocks, "tables": [], "figures": figures})
+            tables, text_blocks = self._extract_aligned_text_tables(
+                text_blocks,
+                page_width=float(page.rect.width),
+            )
+            pages.append({"page_num": page_num, "text_blocks": text_blocks, "tables": tables, "figures": figures})
 
         doc.close()
         duration = time.time() - start_time
@@ -349,3 +363,88 @@ class DocumentParserService:
                 "parser_profile": "FALLBACK_PYMUPDF"
             }
         }
+
+    @staticmethod
+    def _extract_aligned_text_tables(
+        text_blocks: list[dict[str, Any]],
+        page_width: float,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Recover tables whose cells PyMuPDF exposes as separate text blocks."""
+        row_positions: set[int] = set()
+        for block in text_blocks:
+            text = block.get("text", "").strip()
+            bbox = block.get("bbox", [])
+            if len(bbox) < 4 or not re.search(r"\b[A-Z]{1,3}\s*\d+\s*[x×]\s*\d", text, re.IGNORECASE):
+                continue
+            row_positions.add(round(float(bbox[1]) / 2) * 2)
+
+        table_rows = [
+            (
+                row_y,
+                sorted(
+                    [
+                        block for block in text_blocks
+                        if len(block.get("bbox", [])) >= 4
+                        and abs(float(block["bbox"][1]) - row_y) <= 2.5
+                    ],
+                    key=lambda item: float(item["bbox"][0]),
+                ),
+            )
+            for row_y in row_positions
+        ]
+        table_rows = [
+            (row_y, blocks)
+            for row_y, blocks in table_rows
+            if len(blocks) >= 4
+        ]
+        if len(table_rows) < 2:
+            return [], text_blocks
+
+        table_rows.sort(key=lambda row: row[0])
+        first_row_y = table_rows[0][0]
+        last_row_y = table_rows[-1][0]
+        row_cell_ids = {id(block) for _, blocks in table_rows for block in blocks}
+
+        headings = [
+            block for block in text_blocks
+            if block.get("item_type") == "SectionHeaderItem"
+            and len(re.findall(r"[A-Za-z]", block.get("text", ""))) >= 3
+            and float(block.get("bbox", [0, 0, 0, 0])[1]) < first_row_y
+        ]
+        title_block = min(
+            headings,
+            key=lambda block: first_row_y - float(block["bbox"][1]),
+            default=None,
+        )
+        title = title_block.get("text", "").strip() if title_block else ""
+
+        header_blocks = [
+            block for block in text_blocks
+            if block not in [cell for _, cells in table_rows for cell in cells]
+            and len(block.get("bbox", [])) >= 4
+            and first_row_y - 55 <= float(block["bbox"][1]) < first_row_y
+        ]
+        headers = sorted(header_blocks, key=lambda block: float(block["bbox"][0]))
+        row_cell_ids.update(id(block) for block in headers)
+
+        row_lines: list[str] = []
+        for _, cells in table_rows:
+            row_lines.append(" | ".join(cell["text"].strip() for cell in cells))
+
+        header_text = " | ".join(block.get("text", "").strip() for block in headers)
+        markdown = "\n".join(part for part in [header_text, *row_lines] if part)
+        table_content_rows = ([header_text] if header_text else []) + row_lines
+        table = {
+            "title": title,
+            "markdown": markdown,
+            "rows": table_content_rows,
+            "bbox": [
+                min(float(block["bbox"][0]) for _, cells in table_rows for block in cells),
+                first_row_y,
+                max(float(block["bbox"][2]) for _, cells in table_rows for block in cells),
+                max(float(block["bbox"][3]) for _, cells in table_rows for block in cells),
+            ],
+            "source": "pymupdf_aligned_text",
+        }
+        residual = [block for block in text_blocks if id(block) not in row_cell_ids]
+        return [table], residual

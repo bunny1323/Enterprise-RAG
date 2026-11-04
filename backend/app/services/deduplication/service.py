@@ -48,20 +48,25 @@ class DeduplicationService:
     async def check_file_hash(
         self, sha256: str, tenant_id: str, current_doc_id: UUID, postgres: PostgresClient
     ) -> dict | None:
-        """Query PostgreSQL for an existing completed document with the same SHA-256."""
+        """Query PostgreSQL for an existing completed document with the same SHA-256 and verified chunks."""
         row = await postgres.fetchrow(
             """
-            SELECT id, sha256, file_name, version, content_hash
-            FROM documents
-            WHERE sha256 = $1 AND tenant_id = $2 AND id != $3 AND status = 'COMPLETED'
-            ORDER BY created_at DESC
+            SELECT d.id, d.sha256, d.file_name, d.version, d.content_hash,
+                   COUNT(c.chunk_id) AS chunk_count
+            FROM documents d
+            LEFT JOIN chunks c ON c.document_id = d.id
+            WHERE d.sha256 = $1 AND d.tenant_id = $2 AND d.id != $3 AND d.status = 'COMPLETED'
+            GROUP BY d.id
+            ORDER BY d.created_at DESC
             LIMIT 1
             """,
             sha256,
             tenant_id,
             current_doc_id,
         )
-        return row
+        if row and row.get("chunk_count", 0) > 0:
+            return row
+        return None
 
     async def get_failed_document_by_hash(
         self, sha256: str, tenant_id: str, current_doc_id: UUID, postgres: PostgresClient

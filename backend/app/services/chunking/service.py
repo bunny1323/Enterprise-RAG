@@ -773,7 +773,10 @@ class ChunkingService:
         chunks = []
         ROW_GROUP_SIZE = 10
         
-        title_prefix = f"Table from {sec_label}:\n" if sec_title else ""
+        title_prefix = (
+            f"{table_title}\n" if table_title
+            else (f"Table from {sec_label}:\n" if sec_title else "")
+        )
         
         if not body_lines:
             content = title_prefix + "\n".join(header_lines)

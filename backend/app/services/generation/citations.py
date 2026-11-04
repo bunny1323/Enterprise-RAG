@@ -14,6 +14,7 @@ class CitationService:
         answer: str,
         evidence: list[SearchResult],
         document_sections: dict[int, str] | None = None,
+        supporting_chunk_ids: set[str] | None = None,
     ) -> tuple[list[Citation], list[SourceRef]]:
         """
         Map evidence chunks to structured Citation objects and unique SourceRefs with strict consistency checks.
@@ -22,7 +23,12 @@ class CitationService:
         sources_seen: set[str] = set()
         sources: list[SourceRef] = []
 
-        for item in evidence:
+        citation_evidence = (
+            [item for item in evidence if item.chunk_id in supporting_chunk_ids]
+            if supporting_chunk_ids is not None
+            else evidence
+        )
+        for item in citation_evidence:
             snippet = item.content[:150] + "..." if len(item.content) > 150 else item.content
 
             # Source-derived section resolution:

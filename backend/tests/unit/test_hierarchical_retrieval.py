@@ -144,3 +144,45 @@ async def test_duplicate_children_return_one_parent() -> None:
     assert len(results) == 1
     assert results[0].chunk_id == "parent-1"
     assert results[0].content == "Shared parent context."
+
+
+@pytest.mark.asyncio
+async def test_parent_candidate_and_expanded_child_return_one_chunk() -> None:
+    postgres = AsyncMock()
+    postgres.fetch.return_value = [
+        {
+            "chunk_id": "parent-1",
+            "parent_id": None,
+            "document_id": "doc-1",
+            "content": "Parent context from storage.",
+            "page_number": 1,
+            "chunk_type": "PARENT",
+            "section": "Hydraulic system",
+            "subsection": None,
+            "context_prefix": None,
+            "metadata": {},
+        }
+    ]
+    service = HierarchicalRetrievalService(postgres)
+    parent = SearchResult(
+        chunk_id="parent-1",
+        score=0.95,
+        content="Parent context from retrieval.",
+        document_id="doc-1",
+        file_name="manual.pdf",
+    )
+    child = SearchResult(
+        chunk_id="child-1",
+        score=0.8,
+        content="Child passage.",
+        document_id="doc-1",
+        file_name="manual.pdf",
+        parent_id="parent-1",
+    )
+
+    results = await service.expand_to_parents([parent, child])
+
+    assert len(results) == 1
+    assert results[0].chunk_id == "parent-1"
+    assert results[0].score == 0.95
+    assert results[0].content == "Parent context from retrieval."

@@ -115,6 +115,14 @@ class TestProtectedTokens:
 
 
 class TestIntentAndChannelsInNormalizedQuery:
+    @pytest.mark.parametrize("query", [
+        "List all the sections of the machine.",
+        "List all sections in the manual.",
+        "List the major sections of the manual.",
+    ])
+    def test_list_all_sections_intent(self, norm_service, query):
+        assert norm_service.normalize(query).intent == "LIST_QUERY"
+
     def test_all_intents_populate_typo_and_retrieval_query(self, norm_service):
         queries = [
             "How many major sections are there in the manual?",  # COUNT_QUERY

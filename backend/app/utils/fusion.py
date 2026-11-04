@@ -34,9 +34,44 @@ def reciprocal_rank_fusion(
             rrf_contrib = 1.0 / (k + rank)
             scores[cid] = scores.get(cid, 0.0) + rrf_contrib
 
-            # Keep item with richest context/metadata
-            if cid not in item_map or (item.context_prefix and not item_map[cid].context_prefix):
+            if cid not in item_map:
                 item_map[cid] = item
+            else:
+                existing = item_map[cid]
+                updates = {}
+                for field in (
+                    "document_id",
+                    "file_name",
+                    "page_number",
+                    "chunk_type",
+                    "parent_id",
+                    "section",
+                    "section_number",
+                    "section_title",
+                    "subsection",
+                    "context_prefix",
+                    "image_path",
+                ):
+                    current_value = getattr(existing, field)
+                    candidate_value = getattr(item, field)
+                    if not current_value and candidate_value:
+                        updates[field] = candidate_value
+
+                if not existing.content and item.content:
+                    updates["content"] = item.content
+                if item.metadata:
+                    merged_metadata = {**item.metadata, **existing.metadata}
+                    subqueries = list(dict.fromkeys(
+                        [
+                            *existing.metadata.get("_retrieval_subqueries", []),
+                            *item.metadata.get("_retrieval_subqueries", []),
+                        ]
+                    ))
+                    if subqueries:
+                        merged_metadata["_retrieval_subqueries"] = subqueries
+                    updates["metadata"] = merged_metadata
+                if updates:
+                    item_map[cid] = existing.model_copy(update=updates)
 
     # Sort candidates by combined score in descending order
     sorted_cids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)

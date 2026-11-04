@@ -1,0 +1,26 @@
+$kind: http-request
+name: Cancel Job
+method: POST
+url: '{{base_url}}/api/v1/jobs/{{job_id}}/cancel'
+order: 8000
+headers:
+  - key: X-Tenant-ID
+    value: '{{tenant_id}}'
+  - key: X-Assistant-ID
+    value: '{{assistant_id}}'
+  - key: X-Knowledge-Base-ID
+    value: '{{knowledge_base_id}}'
+body:
+  type: json
+  content: '{}'
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("Status is 200 or 409", () => {
+          pm.expect(pm.response.code).to.be.oneOf([200, 409]);
+      });
+      pm.test("Has message in response", () => {
+          const json = pm.response.json();
+          pm.expect(json).to.have.property("message");
+      });

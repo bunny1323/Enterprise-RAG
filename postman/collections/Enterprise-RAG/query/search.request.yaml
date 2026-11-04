@@ -1,0 +1,37 @@
+$kind: http-request
+name: 'Search (Retrieval Only)'
+method: POST
+url: '{{base_url}}/api/v1/search'
+order: 12000
+headers:
+  - key: X-Tenant-ID
+    value: '{{tenant_id}}'
+  - key: X-Assistant-ID
+    value: '{{assistant_id}}'
+  - key: X-Knowledge-Base-ID
+    value: '{{knowledge_base_id}}'
+body:
+  type: json
+  content: |-
+    {
+      "query": "safety procedures",
+      "top_k": 10,
+      "retrieval_profile": "default"
+    }
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("Status is 200", () => pm.response.to.have.status(200));
+      pm.test("Has answer field", () => {
+          const json = pm.response.json();
+          pm.expect(json).to.have.property("answer");
+      });
+      pm.test("Has evidence array", () => {
+          const json = pm.response.json();
+          pm.expect(json.evidence).to.be.an("array");
+      });
+      pm.test("Has trace_id", () => {
+          const json = pm.response.json();
+          pm.expect(json).to.have.property("trace_id");
+      });

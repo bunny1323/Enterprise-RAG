@@ -1,0 +1,22 @@
+$kind: http-request
+name: Retry Job
+method: POST
+url: '{{base_url}}/api/v1/jobs/{{job_id}}/retry'
+order: 9000
+headers:
+  - key: X-Tenant-ID
+    value: '{{tenant_id}}'
+  - key: X-Assistant-ID
+    value: '{{assistant_id}}'
+  - key: X-Knowledge-Base-ID
+    value: '{{knowledge_base_id}}'
+body:
+  type: json
+  content: '{}'
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("Status is 200 or 409", () => {
+          pm.expect(pm.response.code).to.be.oneOf([200, 409]);
+      });

@@ -107,6 +107,7 @@ class RRFRerankerService:
         query: str,
         candidates: list[SearchResult],
         top_n: int = 10,
+        relevance_queries: list[str] | None = None,
     ) -> list[SearchResult]:
         """
         Rerank candidates using the cross-encoder.
@@ -147,8 +148,21 @@ class RRFRerankerService:
             )
             return sorted_by_fusion[:top_n]
 
-        # Build (query, passage) pairs for the cross-encoder
-        pairs = [(query, c.content or "") for c in sorted_by_fusion]
+        queries = list(dict.fromkeys(
+            text.strip()
+            for text in [query, *(relevance_queries or [])]
+            if text and text.strip()
+        ))
+        if not queries:
+            return sorted_by_fusion[:top_n]
+
+        # Keep one global candidate pool while scoring each chunk against every
+        # explicit retrieval requirement in the same model invocation.
+        pairs = [
+            (relevance_query, candidate.content or "")
+            for candidate in sorted_by_fusion
+            for relevance_query in queries
+        ]
 
         try:
             scores = reranker.predict(pairs)
@@ -162,10 +176,27 @@ class RRFRerankerService:
             return sorted_by_fusion[:top_n]
 
         # Attach cross-encoder scores and re-sort
-        reranked = [
-            result.model_copy(update={"score": float(score)})
-            for result, score in zip(sorted_by_fusion, scores)
-        ]
+        reranked = []
+        for index, result in enumerate(sorted_by_fusion):
+            start = index * len(queries)
+            candidate_scores = scores[start:start + len(queries)]
+            if len(candidate_scores) == 0:
+                continue
+            requirement_scores = {
+                relevance_query: float(candidate_scores[query_index])
+                for query_index, relevance_query in enumerate(queries)
+            }
+            reranked.append(
+                result.model_copy(
+                    update={
+                        "score": max(requirement_scores.values()),
+                        "metadata": {
+                            **result.metadata,
+                            "_rerank_requirement_scores": requirement_scores,
+                        },
+                    }
+                )
+            )
         reranked.sort(key=lambda x: x.score, reverse=True)
         final = reranked[:top_n]
 

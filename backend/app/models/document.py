@@ -91,3 +91,5 @@ class DocumentStatusResponse(BaseModel):
     created_at: datetime
     completed_at: datetime | None = None
     error_message: str | None = None
+    canonical_document_id: UUID | None = None
+    is_duplicate: bool = False
