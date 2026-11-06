@@ -21,7 +21,7 @@ services:
       - key: API_AUTH_TOKEN
         sync: false
       - key: OPA_ENABLED
-        value: "true"
+        value: "false"
       - key: OPA_URL
         sync: false
       - key: OPA_AUTH_TOKEN
