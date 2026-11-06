@@ -82,11 +82,12 @@ flowchart TD
 
 The chat route creates `QueryNodes`, builds a LangGraph, and invokes it with the
 tenant context and initial query state. `evaluate_policy` calls OPA and supplies
-permitted access levels. If `OPA_ENABLED=false`, the policy client instead
-requires an authenticated identity bound to the tenant and an explicitly
-authorized knowledge base, then permits only `PUBLIC` retrieval reads; other
-actions are denied. Images are unavailable in this mode. Health reports
-`OPA_DISABLED_PUBLIC_ONLY` and `limited`, not full OPA protection.
+permitted access levels. In the temporary Render configuration, both
+`API_KEY_AUTH_ENABLED=false` and `OPA_ENABLED=false`: unauthenticated chat/search
+is pinned to `DEFAULT_TENANT_ID` and the `default` knowledge base, and the
+policy client permits only `PUBLIC` retrieval reads. Tenant/KB overrides,
+document/job endpoints, writes, and images are denied. Health identifies the
+combined reduced-security mode and reports `limited`, not fully protected.
 `check_cache` looks for an exact response and then a semantic response. A cache
 hit terminates the graph; lookup failures are logged and treated as misses.
 

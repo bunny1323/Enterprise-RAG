@@ -2,7 +2,8 @@
 Open Policy Agent (OPA) client for authorization policy evaluation.
 Note: OPA is NOT authentication. It evaluates already-authenticated claims
 and returns permitted access filters for retrieval (e.g. permitted_access_levels).
-Default-deny approach when security metadata is missing.
+In the explicit no-OPA fallback, only a fixed anonymous PUBLIC scope may be
+allowed. Missing security metadata is denied.
 """
 
 import httpx
@@ -41,7 +42,7 @@ class OPAClient:
         if not enabled:
             logger.warning(
                 "opa.disabled_public_only",
-                message="OPA is disabled; only authenticated PUBLIC retrieval in authorized tenant/knowledge-base scopes is allowed.",
+                message="OPA is disabled; only PUBLIC retrieval in authorized tenant/knowledge-base scopes is allowed.",
             )
 
     async def evaluate_retrieval_policy(
@@ -70,12 +71,17 @@ class OPAClient:
                 isinstance(allowed_knowledge_bases, list)
                 and ctx.knowledge_base_id in allowed_knowledge_bases
             )
+            unauthenticated_public_mode = claims.get("api_auth_disabled_public_only") is True
+            identity_is_allowed = (
+                claims.get("is_authenticated") is True or unauthenticated_public_mode
+            )
             if (
                 action != "read"
-                or claims.get("is_authenticated") is not True
+                or not identity_is_allowed
                 or not ctx.tenant_id
                 or not tenant_is_allowed
                 or not knowledge_base_is_allowed
+                or (unauthenticated_public_mode and ctx.access_level != "PUBLIC")
             ):
                 return PolicyDecision(
                     allowed=False,

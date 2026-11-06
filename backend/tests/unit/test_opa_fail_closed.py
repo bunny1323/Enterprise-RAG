@@ -7,6 +7,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.api.dependencies import get_tenant_context
+from app.api.dependencies import require_authenticated_access
 from app.api.routes.health import health_check, readiness_check
 from app.api.routes.images import get_document_image
 from app.config.settings import Settings
@@ -71,6 +72,46 @@ async def test_disabled_opa_allows_only_authenticated_public_reads_in_authorized
 
 
 @pytest.mark.asyncio
+async def test_disabled_opa_allows_unauthenticated_only_in_explicit_default_public_scope():
+    settings = Settings(
+        _env_file=None,
+        app_env="production",
+        api_key_auth_enabled=False,
+        opa_enabled=False,
+        default_tenant_id="tenant-primary",
+    )
+    request = SimpleNamespace(
+        headers={},
+        query_params={},
+        client=SimpleNamespace(host="127.0.0.1"),
+        url=SimpleNamespace(path="/api/v1/chat"),
+    )
+    context = get_tenant_context(request, settings)
+    client = OPAClient(enabled=False)
+
+    decision = await client.evaluate_retrieval_policy(context)
+    protected_action = await client.evaluate_retrieval_policy(context, action="write")
+    other_scope = context.model_copy(update={"knowledge_base_id": "other"})
+    other_kb_decision = await client.evaluate_retrieval_policy(other_scope)
+
+    assert decision.allowed is True
+    assert decision.permitted_access_levels == ["PUBLIC"]
+    assert decision.permitted_tenants == ["tenant-primary"]
+    assert protected_action.allowed is False
+    assert other_kb_decision.allowed is False
+    await client.close()
+
+
+def test_protected_data_operations_are_denied_in_production_auth_disabled_mode():
+    context = TenantContext(
+        claims={"api_auth_disabled_public_only": True, "is_authenticated": False}
+    )
+
+    with pytest.raises(HTTPException, match="unavailable while API token authentication is disabled"):
+        require_authenticated_access(context, "Document upload")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("context", "action"),
     [
@@ -122,21 +163,19 @@ async def test_disabled_opa_denies_unauthenticated_or_protected_requests(context
     await client.close()
 
 
-def test_production_opa_disabled_requires_authentication_and_allows_missing_opa_url():
+def test_production_opa_disabled_allows_missing_opa_url_and_api_tokens():
     settings = Settings(
+        _env_file=None,
         app_env="production",
-        api_key_auth_enabled=True,
-        api_auth_token="a-real-long-enough-production-token",
+        api_key_auth_enabled=False,
+        api_auth_token="",
+        admin_api_token="",
+        api_tokens_json="",
         opa_enabled=False,
         opa_url="",
     )
 
     assert settings.opa_enabled is False
-
-
-def test_opa_disabled_cannot_be_configured_without_api_authentication():
-    with pytest.raises(ValueError, match="OPA_ENABLED=false requires API_KEY_AUTH_ENABLED=true"):
-        Settings(opa_enabled=False, api_key_auth_enabled=False)
 
 
 @pytest.mark.asyncio
@@ -188,6 +227,7 @@ async def test_health_reports_limited_public_only_mode_and_keeps_readiness_expli
             redis_url="",
             llm_provider="groq",
             llm_model="test-model",
+            api_key_auth_enabled=False,
         ),
     )
     request = SimpleNamespace(app=SimpleNamespace(state=state))
@@ -196,8 +236,9 @@ async def test_health_reports_limited_public_only_mode_and_keeps_readiness_expli
     ready = await readiness_check(request)
 
     assert payload["status"] == "limited"
-    assert payload["security_mode"] == "OPA_DISABLED_PUBLIC_ONLY"
+    assert payload["security_mode"] == "API_AUTH_AND_OPA_DISABLED_PUBLIC_ONLY"
     assert payload["services"]["opa"].startswith("disabled")
+    assert payload["services"]["api_authentication"].startswith("disabled")
     assert ready.status_code == 200
     assert b"OPA_DISABLED_PUBLIC_ONLY" in ready.body
     await opa.close()

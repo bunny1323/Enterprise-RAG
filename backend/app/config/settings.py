@@ -263,11 +263,6 @@ class Settings(BaseSettings):
             return any(tok in v for tok in _PLACEHOLDER_TOKENS)
 
         if self.is_production:
-            if not self.api_key_auth_enabled:
-                raise ValueError(
-                    f"Production configuration error: API_KEY_AUTH_ENABLED must be set to 'true' "
-                    f"in production mode (APP_ENV={self.app_env!r})."
-                )
             if self.opa_enabled:
                 from urllib.parse import urlparse
 
@@ -282,21 +277,16 @@ class Settings(BaseSettings):
                         "Production configuration error: OPA_URL must be an HTTPS hosted policy service "
                         "when OPA_ENABLED=true."
                     )
-            if not self.api_auth_token and not self.admin_api_token and not self.api_tokens_json:
-                raise ValueError(
-                    "Production configuration error: API_AUTH_TOKEN, ADMIN_API_TOKEN, or API_TOKENS_MAPPING "
-                    "must be configured when authentication is enabled in production mode."
-                )
-            if self.api_auth_token and _has_placeholder(self.api_auth_token):
-                raise ValueError("Production configuration error: API_AUTH_TOKEN contains placeholder text.")
-            if self.admin_api_token and _has_placeholder(self.admin_api_token):
-                raise ValueError("Production configuration error: ADMIN_API_TOKEN contains placeholder text.")
-
-        if not self.opa_enabled and not self.api_key_auth_enabled:
-            raise ValueError(
-                "OPA_ENABLED=false requires API_KEY_AUTH_ENABLED=true; "
-                "unauthenticated requests cannot use the reduced-security mode."
-            )
+            if self.api_key_auth_enabled:
+                if not self.api_auth_token and not self.admin_api_token and not self.api_tokens_json:
+                    raise ValueError(
+                        "Production configuration error: API_AUTH_TOKEN, ADMIN_API_TOKEN, or API_TOKENS_MAPPING "
+                        "must be configured when API_KEY_AUTH_ENABLED=true."
+                    )
+                if self.api_auth_token and _has_placeholder(self.api_auth_token):
+                    raise ValueError("Production configuration error: API_AUTH_TOKEN contains placeholder text.")
+                if self.admin_api_token and _has_placeholder(self.admin_api_token):
+                    raise ValueError("Production configuration error: ADMIN_API_TOKEN contains placeholder text.")
 
         # ── 1. Placeholder detection ──────────────────────────────────────────
 

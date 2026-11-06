@@ -61,9 +61,9 @@ Production configuration is injected via Render environment variables. **Do not 
 | `OLLAMA_MODEL` | No | configured model | Model to use if the Ollama fallback is enabled. |
 | `VISION_PROVIDER` | Yes | `disabled` | Set to `gemini` if multimodal image processing is enabled; otherwise `disabled`. |
 | `GEMINI_API_KEY` | Optional | — | Required only if `VISION_PROVIDER=gemini`. |
-| `API_KEY_AUTH_ENABLED` | Yes | `true` | Must be `true` in production to enforce Bearer token validation. |
-| `API_AUTH_TOKEN` | Yes | — | High-entropy secret token for authorized API access. |
-| `OPA_ENABLED` | Yes | `true` | Keep `true` for normal operation. Temporary `false` mode requires API-key authentication and restricts access to PUBLIC retrieval in the authenticated tenant and authorized knowledge base; image access and policy-dependent protected actions are denied. Health reports `OPA_DISABLED_PUBLIC_ONLY`. |
+| `API_KEY_AUTH_ENABLED` | Yes | `true` | `true` requires configured token credentials. Temporary Render mode is `false`, permitting only PUBLIC reads in the configured default tenant and `default` knowledge base; scope overrides and write/data-management operations are denied. |
+| `API_AUTH_TOKEN` | When token authentication is enabled | — | High-entropy secret token for authorized API access. |
+| `OPA_ENABLED` | Yes | `true` | Keep `true` for normal operation. With temporary `false`, only PUBLIC retrieval reads in authorized scopes are allowed; image access and protected actions are denied. Health identifies the reduced mode. |
 | `OPA_URL` | When OPA is enabled | `http://localhost:8181` (development only) | Hosted OPA decision endpoint. Production startup rejects a localhost URL when OPA is enabled; policy outages deny retrieval. |
 | `OPA_AUTH_TOKEN` | If required | empty | Bearer token for the hosted OPA endpoint. |
 | `CORS_ORIGINS` | Yes | — | Comma-separated exact frontend origins. |
@@ -101,19 +101,14 @@ the backend's CORS allowlist together, then rebuild the frontend.
 
 ### Temporary deployment without OPA
 
-If a hosted OPA service is not yet available, set `OPA_ENABLED=false` in the
-backend Render service environment and redeploy. Do not disable
-`API_KEY_AUTH_ENABLED` or remove the configured API token. This mode is
-intentionally limited: only authenticated `read` requests can retrieve
-`PUBLIC` chunks, and only for the token's authorized tenant and knowledge base.
-Mapped API tokens may declare `allowed_knowledge_bases`; otherwise they are
-restricted to the `default` knowledge base. Image access is denied, and all
-non-read policy actions are denied. The `/health` and `/health/ready` responses
-identify this mode as `OPA_DISABLED_PUBLIC_ONLY` with status `limited`.
-This is a temporary reduced-security operating mode, not a substitute for OPA;
-restore `OPA_ENABLED=true` and configure hosted OPA before relying on protected
-content or image retrieval.
-
+The current Render Blueprint temporarily sets both `OPA_ENABLED=false` and
+`API_KEY_AUTH_ENABLED=false`. In this combined mode, unauthenticated callers
+are pinned to `DEFAULT_TENANT_ID` and the `default` knowledge base, may retrieve
+only `PUBLIC` evidence, and cannot override tenant/KB headers, access document
+or job endpoints, upload/delete documents, cancel jobs, or retrieve images.
+Health reports the limited security mode. Re-enable API token authentication
+and hosted OPA before enabling protected content, tenant switching, or
+ingestion operations.
 ---
 
 ## 3. Standard Operating Procedures (SOP)

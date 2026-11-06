@@ -284,13 +284,7 @@ def create_app() -> FastAPI:
 
     app = FastAPI(
         title=settings.app_name,
-        description=(
-            "Multi-tenant document ingestion and evidence-grounded question answering. "
-            "The query path is a LangGraph workflow; ingestion is processed by a "
-            "PostgreSQL-backed leased worker. Retrieval combines vector, keyword, "
-            "and optional graph search with rank fusion, reranking, citations, and "
-            "groundedness checks. External data and policy services must be configured."
-        ),
+        description="Enterprise-RAG API for document ingestion and evidence-grounded question answering.",
         version="0.2.0",
         openapi_tags=[
             {"name": "health", "description": "Liveness and required dependency readiness."},

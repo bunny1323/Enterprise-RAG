@@ -17,9 +17,7 @@ services:
       - key: DEBUG
         value: "false"
       - key: API_KEY_AUTH_ENABLED
-        value: "true"
-      - key: API_AUTH_TOKEN
-        sync: false
+        value: "false"
       - key: OPA_ENABLED
         value: "false"
       - key: OPA_URL

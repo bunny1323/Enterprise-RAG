@@ -8,7 +8,13 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile, status
 
-from app.api.dependencies import PostgresDep, SupervisorDep, TenantContextDep, get_supervisor
+from app.api.dependencies import (
+    PostgresDep,
+    SupervisorDep,
+    TenantContextDep,
+    get_supervisor,
+    require_authenticated_access,
+)
 from app.agents.supervisor.agent import IngestionSupervisor
 from app.config.logging import get_logger
 from app.models.document import DocumentStatusResponse
@@ -40,6 +46,7 @@ async def upload_document(
     - **file**: Multipart PDF file (max 100 MB)
     - **industry**: Industry domain for metadata enrichment (default: manufacturing)
     """
+    require_authenticated_access(tenant_ctx, "Document upload")
     if not file.filename:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -104,6 +111,7 @@ async def get_document_status(
 
     Returns current status, progress percentage, and timestamps.
     """
+    require_authenticated_access(tenant_ctx, "Document status")
     # Validate UUID format
     try:
         doc_uuid = uuid.UUID(document_id)
@@ -172,6 +180,7 @@ async def list_documents(
     - **limit**: Max results (default 20, max 100)
     - **offset**: Pagination offset
     """
+    require_authenticated_access(tenant_ctx, "Document listing")
     limit = min(limit, 100)
 
     if status_filter:
@@ -244,6 +253,7 @@ async def delete_document(
     3. Purge from Neo4j knowledge graph
     4. Purge uploaded raw file and extracted figure images from disk
     """
+    require_authenticated_access(tenant_ctx, "Document deletion")
     try:
         doc_uuid = uuid.UUID(document_id)
     except ValueError:

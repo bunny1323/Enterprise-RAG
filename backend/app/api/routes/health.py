@@ -103,6 +103,12 @@ async def health_check(request: Request) -> dict:
 
     # ── LLM Provider (Groq / Ollama) ──────────────────────────────────────────
     settings = getattr(request.app.state, "settings", None)
+    if settings and not getattr(settings, "api_key_auth_enabled", True):
+        services["api_authentication"] = (
+            "disabled (PUBLIC reads limited to default tenant/default knowledge base; mutations denied)"
+        )
+    else:
+        services["api_authentication"] = "enabled"
     if settings:
         services["llm"] = f"configured ({settings.llm_provider}: {settings.llm_model})"
     else:
@@ -164,9 +170,24 @@ async def health_check(request: Request) -> dict:
         services["redis"] = "disabled"
 
     opa_disabled = not getattr(getattr(request.app.state, "opa", None), "enabled", True)
+    api_auth_disabled = not getattr(settings, "api_key_auth_enabled", True)
+    if opa_disabled and api_auth_disabled:
+        security_mode = "API_AUTH_AND_OPA_DISABLED_PUBLIC_ONLY"
+    elif api_auth_disabled:
+        security_mode = "API_AUTH_DISABLED_PUBLIC_ONLY"
+    elif opa_disabled:
+        security_mode = "OPA_DISABLED_PUBLIC_ONLY"
+    else:
+        security_mode = "OPA_ENFORCED"
     return {
-        "status": "degraded" if not overall_healthy else "limited" if opa_disabled else "healthy",
-        "security_mode": "OPA_DISABLED_PUBLIC_ONLY" if opa_disabled else "OPA_ENFORCED",
+        "status": (
+            "degraded"
+            if not overall_healthy
+            else "limited"
+            if opa_disabled or api_auth_disabled
+            else "healthy"
+        ),
+        "security_mode": security_mode,
         "services": services,
     }
 

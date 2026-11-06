@@ -90,19 +90,113 @@ def test_02_invalid_credentials_rejected():
     assert exc.value.status_code == 401
 
 
-def test_03_production_config_rejects_disabled_authentication():
-    """Startup config validation must fail if APP_ENV is production and auth is disabled."""
+def test_03_production_config_requires_a_token_when_auth_is_enabled(monkeypatch):
+    """Production still requires a token when API authentication is enabled."""
+    for key in (
+        "API_AUTH_TOKEN",
+        "API_KEY",
+        "ADMIN_API_TOKEN",
+        "ADMIN_KEY",
+        "API_TOKENS_MAPPING",
+        "API_TOKENS_JSON",
+    ):
+        monkeypatch.delenv(key, raising=False)
     with pytest.raises(ValueError) as exc:
         Settings(
         _env_file=None,
         app_env="production",
-        api_key_auth_enabled=False,
+        api_key_auth_enabled=True,
+        opa_enabled=False,
         database_url="postgresql://user:pass@localhost:5432/db",
         weaviate_url="https://weaviate.example.com",
         weaviate_api_key="real-weaviate-key",
         neo4j_password="real-neo4j-password",
     )
-    assert "API_KEY_AUTH_ENABLED must be set to 'true'" in str(exc.value)
+    assert "API_AUTH_TOKEN, ADMIN_API_TOKEN, or API_TOKENS_MAPPING" in str(exc.value)
+
+
+def test_production_config_allows_disabled_authentication_without_tokens(monkeypatch):
+    for key in (
+        "API_AUTH_TOKEN",
+        "API_KEY",
+        "ADMIN_API_TOKEN",
+        "ADMIN_KEY",
+        "API_TOKENS_MAPPING",
+        "API_TOKENS_JSON",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    settings = Settings(
+        _env_file=None,
+        app_env="production",
+        debug=False,
+        api_key_auth_enabled=False,
+        opa_enabled=False,
+    )
+    assert settings.app_env == "production"
+    assert settings.debug is False
+    assert settings.api_key_auth_enabled is False
+
+
+def test_production_auth_disabled_pins_anonymous_requests_to_public_default_scope():
+    request = MagicMock()
+    request.headers = {
+        "Authorization": "Bearer ignored",
+        "X-Tenant-ID": "tenant-default",
+        "X-Knowledge-Base-ID": "default",
+        "X-Access-Level": "RESTRICTED",
+        "X-User-ID": "untrusted-user",
+    }
+    request.query_params = {}
+    request.client.host = "10.0.0.1"
+    request.url.path = "/api/v1/chat"
+    settings = Settings(
+        _env_file=None,
+        app_env="production",
+        api_key_auth_enabled=False,
+        api_auth_token="",
+        admin_api_token="",
+        api_tokens_json="",
+        opa_enabled=False,
+        default_tenant_id="tenant-default",
+    )
+
+    ctx = get_tenant_context(request, settings)
+
+    assert ctx.tenant_id == "tenant-default"
+    assert ctx.knowledge_base_id == "default"
+    assert ctx.access_level == "PUBLIC"
+    assert ctx.user_id is None
+    assert ctx.claims["is_authenticated"] is False
+    assert ctx.claims["token_present"] is False
+    assert ctx.claims["api_auth_disabled_public_only"] is True
+    assert ctx.claims["allowed_tenants"] == ["tenant-default"]
+    assert ctx.claims["allowed_knowledge_bases"] == ["default"]
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"X-Tenant-ID": "another-tenant"},
+        {"X-Knowledge-Base-ID": "another-kb"},
+    ],
+)
+def test_production_auth_disabled_rejects_scope_overrides(headers):
+    request = MagicMock()
+    request.headers = headers
+    request.query_params = {}
+    request.client.host = "10.0.0.1"
+    request.url.path = "/api/v1/chat"
+    settings = Settings(
+        _env_file=None,
+        app_env="production",
+        api_key_auth_enabled=False,
+        opa_enabled=False,
+        default_tenant_id="tenant-default",
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        get_tenant_context(request, settings)
+    assert exc.value.status_code == 403
 
 
 def test_04_authenticated_ordinary_user_not_admin():
@@ -455,6 +549,18 @@ def test_15_cycling_tenant_headers_does_not_bypass_rate_limit():
     # Identifiers must be identical because token hash is used instead of client tenant header
     assert id1 == id2
     assert id1.startswith("auth:")
+
+
+def test_rate_limit_ignores_untrusted_tokens_when_authentication_is_disabled():
+    middleware = RateLimitMiddleware(app=MagicMock())
+    request = MagicMock()
+    request.headers = {"Authorization": "Bearer arbitrary"}
+    request.query_params = {}
+    request.client.host = "203.0.113.12"
+    request.app.state.settings.api_key_auth_enabled = False
+    request.app.state.settings.trusted_proxies = []
+
+    assert middleware._resolve_identity(request) == "ip:203.0.113.12"
 
 
 def test_16_spoofed_forwarded_ip_ignored_from_untrusted_source():

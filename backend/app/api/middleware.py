@@ -12,7 +12,7 @@ logger = get_logger(__name__)
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """
     Redis-based fixed window rate limiter with tamper-proof identity resolution.
-    Limits requests per authenticated identity or verified client IP.
+    Limits requests per authenticated identity when enabled, otherwise by verified client IP.
     """
     def __init__(self, app, max_requests: int = 100, window_seconds: int = 60):
         super().__init__(app)
@@ -37,6 +37,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         elif "token" in request.query_params:
             token = request.query_params.get("token", "").strip()
 
+        if token:
+            settings = getattr(request.app.state, "settings", None)
+            if settings is not None and not getattr(settings, "api_key_auth_enabled", True):
+                token = ""
         if token:
             token_digest = hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
             return f"auth:{token_digest}"

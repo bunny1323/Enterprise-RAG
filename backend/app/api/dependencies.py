@@ -93,7 +93,9 @@ def get_tenant_context(
 
     Security & Access Control:
     1. Authentication:
-       - Production Mode (`settings.is_production`): Authentication is mandatory.
+       - Token authentication is mandatory when `api_key_auth_enabled` is true.
+       - If disabled in production, the caller is anonymous and locked to the
+         configured default tenant, default knowledge base, and PUBLIC access.
        - Token matching uses constant-time comparison (`secrets.compare_digest`).
        - Role separation: `admin_api_token` grants `is_admin=True`. Ordinary `api_auth_token`
          or tokens mapped in `api_tokens_json` grant standard user rights (`is_admin=False`).
@@ -106,37 +108,47 @@ def get_tenant_context(
     3. Privilege Escalation Defense:
        - `X-Access-Level: RESTRICTED` is accepted ONLY from verified administrators.
          All unverified callers are clamped to INTERNAL or PUBLIC.
-    4. Development Mode:
+    4. Reduced production mode:
+       - Tenant/knowledge-base overrides are rejected and protected data operations
+         are denied when token authentication is disabled.
+    5. Development Mode:
        - Explicit local development mode (when auth disabled and non-production)
          defaults to `settings.default_tenant_id`.
     """
-    auth_header = request.headers.get("Authorization", "")
-    api_key_header = request.headers.get("X-API-Key", "")
+    auth_disabled_public_only = settings.is_production and not settings.api_key_auth_enabled
+    auth_header = request.headers.get("Authorization", "") if not auth_disabled_public_only else ""
+    api_key_header = request.headers.get("X-API-Key", "") if not auth_disabled_public_only else ""
     token = ""
     if auth_header.startswith("Bearer "):
         token = auth_header[7:].strip()
     elif api_key_header:
         token = api_key_header.strip()
-    elif "token" in request.query_params:
+    elif not auth_disabled_public_only and "token" in request.query_params:
         token = request.query_params.get("token", "").strip()
 
     is_authenticated = False
     is_admin = False
     bound_tenant_id = settings.default_tenant_id
-    allowed_tenants: list[str] = []
+    allowed_tenants: list[str] = [settings.default_tenant_id] if auth_disabled_public_only else []
     allowed_knowledge_bases: list[str] = ["default"]
-    user_id = request.headers.get("X-User-ID", None)
+    user_id = None if auth_disabled_public_only else request.headers.get("X-User-ID", None)
 
     # 1. Parse server-side token mapping if configured
     token_mapping: dict[str, dict[str, Any]] = {}
-    if settings.api_tokens_json:
+    if settings.api_tokens_json and not auth_disabled_public_only:
         try:
             token_mapping = json.loads(settings.api_tokens_json)
         except Exception:
             logger.error("security.api_tokens_mapping_invalid_json")
 
     # 2. Authenticate against configured secrets using constant-time comparison
-    if token:
+    if auth_disabled_public_only:
+        logger.warning(
+            "security.api_auth_disabled_public_only",
+            tenant_id=bound_tenant_id,
+            knowledge_base_id="default",
+        )
+    elif token:
         # Check Admin Token
         if settings.admin_api_token and secrets.compare_digest(token, settings.admin_api_token):
             is_authenticated = True
@@ -171,7 +183,7 @@ def get_tenant_context(
         allowed_tenants = ["*"]  # Permissive only in local dev
 
     # Reject unauthenticated requests when authentication is required
-    if (settings.api_key_auth_enabled or settings.is_production) and not is_authenticated:
+    if settings.api_key_auth_enabled and not is_authenticated:
         logger.warning(
             "security.authentication_failed",
             client_ip=getattr(request.client, "host", "unknown"),
@@ -215,10 +227,20 @@ def get_tenant_context(
 
     # 4. Context identifiers (untrusted headers)
     assistant_id = (request.headers.get("X-Assistant-ID", "default") or "default").strip()
-    kb_id = (request.headers.get("X-Knowledge-Base-ID", "default") or "default").strip()
+    requested_kb = (request.headers.get("X-Knowledge-Base-ID", "default") or "default").strip()
+    if auth_disabled_public_only and requested_kb != "default":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Knowledge-base selection is disabled while API token authentication is off.",
+        )
+    kb_id = "default" if auth_disabled_public_only else requested_kb
 
     # 5. Sanitize and clamp access level
-    raw_access_level = (request.headers.get("X-Access-Level", "INTERNAL") or "INTERNAL").strip().upper()
+    raw_access_level = (
+        "PUBLIC"
+        if auth_disabled_public_only
+        else (request.headers.get("X-Access-Level", "INTERNAL") or "INTERNAL").strip().upper()
+    )
     if raw_access_level == "RESTRICTED":
         if not is_admin:
             logger.warning(
@@ -238,6 +260,7 @@ def get_tenant_context(
 
     claims: dict[str, Any] = {
         "is_authenticated": is_authenticated,
+        "api_auth_disabled_public_only": auth_disabled_public_only,
         "is_admin": is_admin,
         "token_present": bool(token),
         "allowed_tenants": allowed_tenants,
@@ -253,6 +276,15 @@ def get_tenant_context(
         user_id=user_id,
         claims=claims,
     )
+
+
+def require_authenticated_access(tenant_ctx: TenantContext, operation: str) -> None:
+    """Prevent protected data operations when production token authentication is disabled."""
+    if tenant_ctx.claims.get("api_auth_disabled_public_only") is True:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"{operation} is unavailable while API token authentication is disabled.",
+        )
 
 
 TenantContextDep = Annotated[TenantContext, Depends(get_tenant_context)]

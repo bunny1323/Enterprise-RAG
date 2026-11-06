@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.api.dependencies import PostgresDep, TenantContextDep
+from app.api.dependencies import PostgresDep, TenantContextDep, require_authenticated_access
 from app.config.logging import get_logger
 from app.models.job import IngestionJob, JobStatus
 
@@ -29,6 +29,7 @@ async def get_job_status(
     """
     Poll an ingestion job's status, progress, checkpoints, and current stage.
     """
+    require_authenticated_access(tenant_ctx, "Job status")
     try:
         j_uuid = uuid.UUID(job_id)
     except ValueError:
@@ -102,6 +103,7 @@ async def cancel_job(
     tenant_ctx: TenantContextDep,
 ) -> dict:
     """Mark an active ingestion job as CANCELLED."""
+    require_authenticated_access(tenant_ctx, "Job cancellation")
     try:
         j_uuid = uuid.UUID(job_id)
     except ValueError:
