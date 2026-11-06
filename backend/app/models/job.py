@@ -12,6 +12,8 @@ class JobStatus(str, Enum):
     """Lifecycle states for an ingestion job."""
 
     RECEIVED = "RECEIVED"
+    PROCESSING = "PROCESSING"
+    RETRY_WAIT = "RETRY_WAIT"
     VALIDATING = "VALIDATING"
     CHECKING_DUPLICATE = "CHECKING_DUPLICATE"
     PARSING = "PARSING"
@@ -44,6 +46,8 @@ class IngestionJob(BaseModel):
     current_stage: str | None = Field(default=None, description="Current executing pipeline stage")
     progress_percent: int = Field(default=0, ge=0, le=100, description="Job progress percent")
     retry_count: int = Field(default=0, ge=0, description="Current stage retry count")
+    attempt_count: int = Field(default=0, ge=0, description="Number of worker claims")
+    max_attempts: int = Field(default=3, ge=1, description="Maximum worker claims")
     last_successful_stage: str | None = Field(default=None, description="Last completed stage")
     stage_checkpoints: dict[str, bool] = Field(default_factory=dict, description="Checkpoint flags per stage")
     error_message: str | None = Field(default=None, description="Error message if failed")

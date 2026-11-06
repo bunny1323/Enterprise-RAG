@@ -1,7 +1,7 @@
 """
 LangGraph state definitions for the Query Workflow.
 """
-from typing import TypedDict, Any
+from typing import Any, NotRequired, TypedDict
 from app.models.tenant import TenantContext
 from app.models.retrieval import SearchResult
 from app.models.query import Citation, SourceRef
@@ -11,6 +11,9 @@ class QueryWorkflowState(TypedDict):
     State shared across the query workflow graph.
     """
     query: str
+    original_query: NotRequired[str]
+    normalized_query: NotRequired[str]
+    refined_query: NotRequired[str]
     tenant_context: TenantContext
     top_k: int
     
@@ -27,6 +30,7 @@ class QueryWorkflowState(TypedDict):
     graph_results: list[SearchResult]
     fused_results: list[SearchResult]
     reranked_results: list[SearchResult]
+    retrieved_evidence: NotRequired[list[SearchResult]]
     
     # Validation & Refinement
     confidence_level: str
@@ -38,6 +42,7 @@ class QueryWorkflowState(TypedDict):
     citations: list[Citation]
     sources: list[SourceRef]
     verification_status: str
+    refusal_reason: NotRequired[str | None]
     
     # Coverage & Strict Grounding
     evidence_coverage: str

@@ -117,7 +117,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.redis = redis_client
 
     # ── 5. OPA Client ──────────────────────────────────────────────────────────
-    opa_client = OPAClient()
+    opa_client = OPAClient(
+        opa_url=settings.opa_url,
+        auth_token=settings.opa_auth_token,
+    )
     app.state.opa = opa_client
 
     # ── 6. Storage client ──────────────────────────────────────────────────────
@@ -280,8 +283,21 @@ def create_app() -> FastAPI:
 
     app = FastAPI(
         title=settings.app_name,
-        description="Enterprise Multi-Agent RAG Platform — Phase 1 & 2 Complete Architecture",
-        version="2.0.0",
+        description=(
+            "Multi-tenant document ingestion and evidence-grounded question answering. "
+            "The query path is a LangGraph workflow; ingestion is processed by a "
+            "PostgreSQL-backed leased worker. Retrieval combines vector, keyword, "
+            "and optional graph search with rank fusion, reranking, citations, and "
+            "groundedness checks. External data and policy services must be configured."
+        ),
+        version="0.2.0",
+        openapi_tags=[
+            {"name": "health", "description": "Liveness and required dependency readiness."},
+            {"name": "documents", "description": "Upload, inspect, and manage tenant-scoped documents."},
+            {"name": "jobs", "description": "Inspect progress or cancel a durable ingestion job."},
+            {"name": "query", "description": "Run evidence-grounded queries against permitted knowledge bases."},
+            {"name": "images", "description": "Access document figures subject to tenant authorization."},
+        ],
         docs_url="/docs",
         redoc_url="/redoc",
         openapi_url="/openapi.json",
@@ -290,13 +306,13 @@ def create_app() -> FastAPI:
 
     # ── CORS ───────────────────────────────────────────────────────────────────
     import os
-    allowed_origins = [
+    local_origins = [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://localhost:3000",
         "http://127.0.0.1:3000",
-        "https://enterprise-rag-2u7l.onrender.com",
     ]
+    allowed_origins = [] if settings.is_production else local_origins
     custom_origins = os.getenv("CORS_ORIGINS", "")
     if custom_origins:
         for orig in custom_origins.split(","):
@@ -306,7 +322,11 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=allowed_origins,
-        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+        allow_origin_regex=(
+            None
+            if settings.is_production
+            else r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
+        ),
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -325,7 +345,6 @@ def create_app() -> FastAPI:
     app.include_router(query.router)
 
     # Ensure storage paths exist
-    import os
     os.makedirs(settings.processed_storage_path, exist_ok=True)
 
     return app

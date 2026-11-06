@@ -137,7 +137,17 @@ async def step(state: IngestionState, services: dict[str, Any]) -> IngestionStat
         final_job_status = JobStatus.COMPLETED
         progress = 100
 
-        # Increment knowledge base version
+    elif pg_ok or weaviate_ok or neo4j_ok:
+        final_doc_status = DocumentStatus.PARTIAL
+        final_job_status = JobStatus.PARTIAL
+        progress = 95
+        logger.warning("step.index.partial_success", document_id=doc_id, errors=last_err)
+
+    else:
+        raise RuntimeError(f"All indexing backends failed: {last_err}")
+
+    if pg_ok or weaviate_ok or neo4j_ok:
+        # Any newly queryable backend content invalidates cached answers.
         await postgres.execute(
             """
             INSERT INTO knowledge_base_versions (knowledge_base_id, tenant_id, version, updated_at)
@@ -149,13 +159,6 @@ async def step(state: IngestionState, services: dict[str, Any]) -> IngestionStat
             state.knowledge_base_id,
             state.tenant_id,
         )
-    elif pg_ok or weaviate_ok or neo4j_ok:
-        final_doc_status = DocumentStatus.PARTIAL
-        final_job_status = JobStatus.PARTIAL
-        progress = 95
-        logger.warning("step.index.partial_success", document_id=doc_id, errors=last_err)
-    else:
-        raise RuntimeError(f"All indexing backends failed: {last_err}")
 
     # Update document status
     await postgres.execute(
@@ -200,7 +203,13 @@ async def step(state: IngestionState, services: dict[str, Any]) -> IngestionStat
         completed_at=completed_at.isoformat(),
     )
 
-    return state.model_copy(update={"status": final_doc_status, "progress_percent": progress})
+    return state.model_copy(
+        update={
+            "status": final_doc_status,
+            "progress_percent": progress,
+            "error_message": last_err or None,
+        }
+    )
 
 
 async def _insert_chunks_postgres(

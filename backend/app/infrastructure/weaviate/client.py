@@ -4,6 +4,7 @@ Manages connection, schema initialization, vector upsert, and tenant-isolated se
 Uses weaviate-client v4 API.
 """
 import json
+from uuid import NAMESPACE_URL, UUID, uuid5
 from typing import Any
 
 import weaviate
@@ -16,6 +17,11 @@ from app.models.chunk import Chunk
 logger = get_logger(__name__)
 
 _COLLECTION_NAME = "DocumentChunk"
+
+
+def _chunk_object_uuid(chunk_id: str) -> UUID:
+    """Derive a stable Weaviate object UUID so replayed writes replace the same chunk."""
+    return uuid5(NAMESPACE_URL, f"enterprise-rag:chunk:{chunk_id}")
 
 
 class WeaviateClient:
@@ -284,7 +290,11 @@ class WeaviateClient:
                     "file_name": chunk.file_name or "",
                     "image_path": chunk.image_path or "",
                 }
-                batch.add_object(properties=properties, vector=vector)
+                batch.add_object(
+                    properties=properties,
+                    vector=vector,
+                    uuid=_chunk_object_uuid(chunk.chunk_id),
+                )
 
         logger.info("weaviate.chunks_upserted", count=len(chunks))
 
@@ -314,7 +324,13 @@ class WeaviateClient:
         client = self._require_client()
         collection = client.collections.get(_COLLECTION_NAME)
 
-        levels = permitted_access_levels or ["PUBLIC", "INTERNAL"]
+        levels = (
+            permitted_access_levels
+            if permitted_access_levels is not None
+            else ["PUBLIC", "INTERNAL"]
+        )
+        if not levels:
+            return []
         filters = (
             wvc.query.Filter.by_property("tenant_id").equal(tenant_id)
             & wvc.query.Filter.by_property("knowledge_base_id").equal(knowledge_base_id)
@@ -350,7 +366,13 @@ class WeaviateClient:
         client = self._require_client()
         collection = client.collections.get(_COLLECTION_NAME)
 
-        levels = permitted_access_levels or ["PUBLIC", "INTERNAL"]
+        levels = (
+            permitted_access_levels
+            if permitted_access_levels is not None
+            else ["PUBLIC", "INTERNAL"]
+        )
+        if not levels:
+            return []
         filters = (
             wvc.query.Filter.by_property("tenant_id").equal(tenant_id)
             & wvc.query.Filter.by_property("knowledge_base_id").equal(knowledge_base_id)

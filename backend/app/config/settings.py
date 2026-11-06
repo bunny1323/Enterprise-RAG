@@ -60,6 +60,8 @@ class Settings(BaseSettings):
         default="",
         validation_alias=AliasChoices("API_TOKENS_MAPPING", "API_TOKENS_JSON"),
     )
+    opa_url: str = Field(default="http://localhost:8181")
+    opa_auth_token: str = Field(default="")
     default_tenant_id: str = Field(
         default="default",
         validation_alias=AliasChoices("DEFAULT_TENANT_ID"),
@@ -76,6 +78,9 @@ class Settings(BaseSettings):
     # Ingestion Controls
     max_upload_size_mb: int = Field(default=100)
     ingestion_timeout_seconds: int = Field(default=1800)
+    ingestion_job_poll_seconds: float = Field(default=1.0, gt=0)
+    ingestion_job_lease_seconds: int = Field(default=300, ge=3)
+    ingestion_job_max_attempts: int = Field(default=3, ge=1)
     ingestion_timeout_validation: int = Field(default=30)
     ingestion_timeout_duplicate: int = Field(default=60)
     ingestion_timeout_parse: int = Field(default=900)
@@ -261,6 +266,18 @@ class Settings(BaseSettings):
                 raise ValueError(
                     f"Production configuration error: API_KEY_AUTH_ENABLED must be set to 'true' "
                     f"in production mode (APP_ENV={self.app_env!r})."
+                )
+            from urllib.parse import urlparse
+
+            parsed_opa_url = urlparse(self.opa_url)
+            opa_host = parsed_opa_url.hostname
+            if (
+                parsed_opa_url.scheme != "https"
+                or not opa_host
+                or opa_host in {"localhost", "127.0.0.1", "::1"}
+            ):
+                raise ValueError(
+                    "Production configuration error: OPA_URL must be an HTTPS hosted policy service."
                 )
             if not self.api_auth_token and not self.admin_api_token and not self.api_tokens_json:
                 raise ValueError(

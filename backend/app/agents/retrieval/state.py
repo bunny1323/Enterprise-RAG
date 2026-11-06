@@ -11,6 +11,7 @@ from app.models.tenant import TenantContext
 
 class QueryState(BaseModel):
     query: str
+    normalized_query: str = ""
     tenant_context: TenantContext
     top_k: int = 10
     intent: str = "FACTUAL"

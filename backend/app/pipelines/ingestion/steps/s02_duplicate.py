@@ -35,6 +35,7 @@ async def step(state: IngestionState, services: dict[str, Any]) -> IngestionStat
     existing_row = await dedup_service.check_file_hash(
         sha256=sha256,
         tenant_id=state.tenant_id,
+        knowledge_base_id=state.knowledge_base_id,
         current_doc_id=state.document_id,
         postgres=postgres,
     )
@@ -53,7 +54,8 @@ async def step(state: IngestionState, services: dict[str, Any]) -> IngestionStat
             error_message = CASE WHEN status = 'COMPLETED' THEN 'Corrupted canonical document with 0 chunks superseded by retry' ELSE error_message END
         WHERE sha256 = $1
           AND tenant_id = $2
-          AND id != $3
+          AND knowledge_base_id = $3
+          AND id != $4
           AND (
             status != 'COMPLETED'
             OR id NOT IN (SELECT DISTINCT document_id FROM chunks WHERE document_id IS NOT NULL)
@@ -61,6 +63,7 @@ async def step(state: IngestionState, services: dict[str, Any]) -> IngestionStat
         """,
         sha256,
         state.tenant_id,
+        state.knowledge_base_id,
         state.document_id,
     )
 
@@ -83,6 +86,7 @@ async def step(state: IngestionState, services: dict[str, Any]) -> IngestionStat
         winner_row = await dedup_service.check_file_hash(
             sha256=sha256,
             tenant_id=state.tenant_id,
+            knowledge_base_id=state.knowledge_base_id,
             current_doc_id=state.document_id,
             postgres=postgres,
         )
@@ -158,4 +162,3 @@ async def _mark_as_exact_duplicate(
             "completed_at": now,
         }
     )
-

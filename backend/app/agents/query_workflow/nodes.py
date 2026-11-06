@@ -87,6 +87,8 @@ class QueryNodes:
                 span.set_attribute("error_message", state["error_message"])
             
             state["permitted_access_levels"] = decision.permitted_access_levels
+            if not decision.allowed:
+                state["refusal_reason"] = decision.denied_reason or "policy_denied"
             return state
 
     async def check_cache(self, state: QueryWorkflowState) -> QueryWorkflowState:
@@ -98,13 +100,24 @@ class QueryNodes:
 
             ctx = state["tenant_context"]
             span.set_attribute("tenant_id", ctx.tenant_id)
-            cached = await self._cache.get_response(ctx, state["query"])
+            permitted_levels = state.get("permitted_access_levels", [])
+            try:
+                cached = await self._cache.get_response(
+                    ctx,
+                    state["query"],
+                    permitted_access_levels=permitted_levels,
+                )
+            except Exception as err:
+                logger.exception("query_cache.lookup_failed", error=str(err))
+                state["cache_hit"] = False
+                return state
             
             if cached:
                 span.set_attribute("cache_hit", True)
                 state["cache_hit"] = True
                 state["answer"] = cached.get("answer", "")
                 state["citations"] = cached.get("citations", [])
+                state["sources"] = cached.get("sources", [])
                 state["confidence_level"] = cached.get("confidence", "HIGH")
                 state["confidence_score"] = cached.get("confidence_score", 1.0)
                 state["verification_status"] = cached.get("verification_status", "SUPPORTED")
@@ -114,27 +127,35 @@ class QueryNodes:
             # 2. Check semantic cache
             if self._semantic_cache and self._embedder:
                 # Need kb_version for the semantic cache lookup
-                kb_ver = await self._cache.get_kb_version(ctx.tenant_id, ctx.knowledge_base_id)
-                # embed_query is synchronous (local BGE), run in executor
-                loop = asyncio.get_running_loop()
-                query_vec = await loop.run_in_executor(None, self._embedder.embed_query, state["query"])
-                if query_vec:
-                    sem_cached = await self._semantic_cache.get(
-                        ctx=ctx,
-                        query_embedding=query_vec,
-                        kb_version=kb_ver,
+                try:
+                    kb_ver = await self._cache.get_kb_version(
+                        ctx.tenant_id, ctx.knowledge_base_id
                     )
-                    if sem_cached:
-                        span.set_attribute("cache_hit", True)
-                        span.set_attribute("semantic_hit", True)
-                        state["cache_hit"] = True
-                        state["answer"] = sem_cached.get("answer", "")
-                        state["citations"] = sem_cached.get("citations", [])
-                        state["confidence_level"] = sem_cached.get("confidence", "HIGH")
-                        state["confidence_score"] = sem_cached.get("confidence_score", 1.0)
-                        state["verification_status"] = sem_cached.get("verification_status", "SUPPORTED")
-                        state["retrieval_strategy"] = sem_cached.get("retrieval_strategy", "semantic_cache")
-                        return state
+                    loop = asyncio.get_running_loop()
+                    query_vec = await loop.run_in_executor(
+                        None, self._embedder.embed_query, state["query"]
+                    )
+                    if query_vec:
+                        sem_cached = await self._semantic_cache.get(
+                            ctx=ctx,
+                            query_embedding=query_vec,
+                            kb_version=kb_ver,
+                            permitted_access_levels=permitted_levels,
+                        )
+                        if sem_cached:
+                            span.set_attribute("cache_hit", True)
+                            span.set_attribute("semantic_hit", True)
+                            state["cache_hit"] = True
+                            state["answer"] = sem_cached.get("answer", "")
+                            state["citations"] = sem_cached.get("citations", [])
+                            state["sources"] = sem_cached.get("sources", [])
+                            state["confidence_level"] = sem_cached.get("confidence", "HIGH")
+                            state["confidence_score"] = sem_cached.get("confidence_score", 1.0)
+                            state["verification_status"] = sem_cached.get("verification_status", "SUPPORTED")
+                            state["retrieval_strategy"] = sem_cached.get("retrieval_strategy", "semantic_cache")
+                            return state
+                except Exception as err:
+                    logger.exception("query_cache.semantic_lookup_failed", error=str(err))
 
             span.set_attribute("cache_hit", False)
             state["cache_hit"] = False
@@ -149,8 +170,13 @@ class QueryNodes:
 
             span.set_attribute("tenant_id", state["tenant_context"].tenant_id)
 
+            retrieval_query = (
+                state.get("refined_query")
+                or state.get("original_query")
+                or state["query"]
+            )
             qstate = QueryState(
-                query=state["query"],
+                query=retrieval_query,
                 tenant_context=state["tenant_context"],
                 top_k=state["top_k"]
             )
@@ -170,6 +196,9 @@ class QueryNodes:
             state["confidence_level"] = result.confidence_level
             state["confidence_score"] = result.confidence_score
             state["retrieval_strategy"] = result.strategy_used
+            state["normalized_query"] = getattr(
+                result, "normalized_query", ""
+            ) or self._normalizer.normalize(retrieval_query).clean_query
 
             span.set_attribute("confidence_level", result.confidence_level)
             span.set_attribute("confidence_score", result.confidence_score)
@@ -179,6 +208,7 @@ class QueryNodes:
             state["reranked_results"] = _deduplicate_evidence_by_source(
                 state["reranked_results"]
             )
+            state["retrieved_evidence"] = list(state["reranked_results"])
             span.set_attribute("deduped_results_count", len(state["reranked_results"]))
 
             return state
@@ -202,7 +232,9 @@ class QueryNodes:
                 }
                 return state
 
-            norm = self._normalizer.normalize(state["query"])
+            norm = self._normalizer.normalize(
+                state.get("original_query", state["query"])
+            )
             evidence = state.get("reranked_results", [])
             coverage_result = self._coverage_svc.evaluate_coverage(norm, evidence)
 
@@ -231,6 +263,7 @@ class QueryNodes:
             if not coverage_result.answerable:
                 state["answer"] = "The provided evidence does not contain enough information to answer this question."
                 state["verification_status"] = "UNSUPPORTED"
+                state["refusal_reason"] = coverage_result.reason or "insufficient_evidence"
                 state["citations"] = []
                 state["sources"] = []
 
@@ -239,11 +272,12 @@ class QueryNodes:
     async def refine_query(self, state: QueryWorkflowState) -> QueryWorkflowState:
         """Refine query if confidence is low."""
         with tracer.start_as_current_span("QueryNodes.refine_query") as span:
-            # Simple refinement: just append keyword modifier and increment retries
             state["retries"] = state.get("retries", 0) + 1
-            state["query"] = state["query"] + " explain details"
+            original_query = state.get("original_query", state["query"])
+            normalized_query = state.get("normalized_query") or original_query
+            state["refined_query"] = f"{normalized_query} explain details"
             span.set_attribute("retries", state["retries"])
-            span.set_attribute("new_query", state["query"])
+            span.set_attribute("new_query", state["refined_query"])
             return state
 
     async def generate_response(self, state: QueryWorkflowState) -> QueryWorkflowState:
@@ -273,6 +307,7 @@ class QueryNodes:
             if not evidence:
                 span.set_attribute("skipped", True)
                 state["answer"] = "I don't have enough verified information in the knowledge base to answer this question."
+                state["refusal_reason"] = "no_retrieved_evidence"
                 state["citations"] = []
                 state["sources"] = []
                 state["verification_status"] = "UNSUPPORTED"
@@ -302,6 +337,13 @@ class QueryNodes:
                 state["sources"] = []
                 state["verification_status"] = "SUPPORTED"
                 return state
+            if state.get("answerable") is False:
+                state["citations"] = []
+                state["sources"] = []
+                state["verification_status"] = "UNSUPPORTED"
+                state["refusal_reason"] = state.get("refusal_reason") or "insufficient_evidence"
+                span.set_attribute("gated_insufficient_evidence", True)
+                return state
             evidence = state.get("reranked_results", [])
             if not evidence or not state.get("answer"):
                 span.set_attribute("skipped", True)
@@ -319,11 +361,13 @@ class QueryNodes:
             state["verification_status"] = groundedness.verification_status
             if groundedness.verification_status == "UNSUPPORTED":
                 state["answer"] = "The provided evidence does not contain enough information to answer this question."
+                state["refusal_reason"] = "unsupported_by_evidence"
                 state["citations"] = []
                 state["sources"] = []
                 state["confidence_level"] = "LOW"
                 state["confidence_score"] = 0.0
             elif groundedness.verification_status == "PARTIALLY_SUPPORTED":
+                state["refusal_reason"] = "partially_supported"
                 state["answer"] = " ".join(groundedness.supported_sentences)
                 if not state["answer"]:
                     state["answer"] = "The provided evidence does not contain enough information to answer this question."
@@ -343,12 +387,21 @@ class QueryNodes:
                 resp_data = {
                     "answer": state["answer"],
                     "citations": [c.model_dump() for c in citations],
+                    "sources": [source.model_dump() for source in state.get("sources", [])],
                     "confidence": state["confidence_level"],
                     "confidence_score": state["confidence_score"],
                     "verification_status": state["verification_status"],
                     "retrieval_strategy": state["retrieval_strategy"]
                 }
                 # We don't await this so it can run in background, but since it's a fast async call we can
-                await self._cache.set_response(state["tenant_context"], state["query"], resp_data)
+                try:
+                    await self._cache.set_response(
+                        state["tenant_context"],
+                        state.get("original_query", state["query"]),
+                        resp_data,
+                        permitted_access_levels=state.get("permitted_access_levels", []),
+                    )
+                except Exception as err:
+                    logger.exception("query_cache.store_failed", error=str(err))
 
             return state

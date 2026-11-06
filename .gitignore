@@ -15,6 +15,8 @@ __pycache__/
 
 # Test and coverage
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
 .coverage
 htmlcov/
 
@@ -33,9 +35,13 @@ dist/
 frontend/dist/
 .vite/
 frontend/.vite/
+*.tsbuildinfo
 
 # Local application data and documents
 backend/data/
 data/
 *.pdf
-*.log
+*.log*
+/backend/docs.json
+/backend/server.log
+/backend/server_startup.log

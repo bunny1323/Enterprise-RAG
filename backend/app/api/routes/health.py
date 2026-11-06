@@ -86,6 +86,19 @@ async def health_check(request: Request) -> dict:
         overall_healthy = False
         logger.warning("health.neo4j_failed", error=str(err))
 
+    # ── OPA Policy Service ─────────────────────────────────────────────────────
+    try:
+        opa_client = request.app.state.opa
+        if await opa_client.health_check():
+            services["opa"] = "ok"
+        else:
+            services["opa"] = "error: policy service unavailable"
+            overall_healthy = False
+    except Exception as err:
+        services["opa"] = f"error: {str(err)}"
+        overall_healthy = False
+        logger.warning("health.opa_failed", error=str(err))
+
     # ── LLM Provider (Groq / Ollama) ──────────────────────────────────────────
     settings = getattr(request.app.state, "settings", None)
     if settings:
@@ -204,5 +217,4 @@ async def test_llm(request: Request) -> dict:
     except Exception as err:
         logger.error("health.llm_test_failed", error=str(err))
         return {"status": "error", "error": str(err)}
-
 

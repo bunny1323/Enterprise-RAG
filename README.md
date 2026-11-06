@@ -1,12 +1,12 @@
 # Enterprise-RAG
 
-Production-ready Retrieval-Augmented Generation platform for enterprise knowledge bases.
+Retrieval-Augmented Generation platform for enterprise knowledge bases.
 
 ## What is Enterprise-RAG?
 
 Enterprise-RAG transforms enterprise documents into reliable, searchable knowledge. Unlike basic RAG systems, it provides:
 
-- **Document Processing**: Handle PDFs, images, scanned documents, tables, and diagrams with layout-aware parsing
+- **Document Processing**: Parse PDFs, tables, figures, and diagrams with layout-aware extraction; OCR and vision analysis are configurable
 - **Hybrid Retrieval**: Combine dense vector search, keyword search, and knowledge graphs
 - **Citation Verification**: Every answer is backed by verifiable evidence with hallucination detection
 - **Security & Compliance**: Policy enforcement, data lineage tracking, and audit logging
@@ -17,15 +17,15 @@ Perfect for organizations that need explainable, auditable AI responses.
 ## Features
 
 **Document Processing**
-- Multiple format support (PDF, images, scanned docs, tables)
+- PDF parsing with layout-aware text, tables, and figure extraction
 - Layout-aware parsing via Docling
-- OCR and Vision Model support
+- OCR in the high-accuracy parse profile; optional vision analysis (disabled by default)
 - Duplicate detection and metadata enrichment
 - Hierarchical chunking with relationship tracking
 
 **Intelligent Retrieval**
 - Hybrid search (dense vectors + BM25 + graph queries)
-- Multimodal embeddings for text and images
+- Text embeddings for text and image descriptions
 - Cross-encoder reranking with confidence scoring
 - Knowledge graph integration (Neo4j)
 - Result fusion and ranking optimization
@@ -37,8 +37,8 @@ Perfect for organizations that need explainable, auditable AI responses.
 - Source attribution and evidence highlighting
 - Execution traces for explainability
 
-**Production Ready**
-- OpenTelemetry integration for distributed tracing
+**Operational Tooling**
+- Optional OpenTelemetry integration for distributed tracing
 - Structured logging and error tracking
 - Continuous evaluation (RAGAS, DeepEval)
 - Semantic and response caching
@@ -102,34 +102,52 @@ python -m uvicorn app.main:app --reload
 
 Visit `http://localhost:8000/docs` for interactive API documentation.
 
+## Render Deployment
+
+The root `render.yaml` defines a Docker-backed FastAPI web service rooted at
+`backend/` and a Vite static site rooted at `frontend/`. The backend binds to
+Render's `$PORT` on `0.0.0.0`; its Render health check uses `/health/live`.
+The Vite build receives `VITE_API_BASE_URL` at build time and must be rebuilt
+when the backend URL changes.
+
+Before deploying, provide the `sync: false` variables in Render:
+`API_AUTH_TOKEN`, `DATABASE_URL`, `WEAVIATE_URL`, `WEAVIATE_API_KEY`,
+`NEO4J_URI`, `NEO4J_PASSWORD`, and `GROQ_API_KEY`. Use hosted PostgreSQL,
+Weaviate Cloud, and Neo4j Aura endpoints; the local URLs in `.env.example`
+are for development only. `REDIS_URL` is optional. `GEMINI_API_KEY` is only
+needed with `VISION_PROVIDER=gemini`. Set `ADMIN_API_TOKEN` separately if
+administrator access is needed.
+
+The backend blueprint attaches a persistent disk at `/data` for uploads,
+processed documents, and local model caches. Uploaded files are not durable
+without that disk. The app also needs enough memory and disk for its local
+embedding model, document parser, OCR, and optional cross-encoder reranker.
+`/health/ready` reports downstream dependency readiness; a successful image
+build alone does not verify external services or end-to-end ingestion.
+
 ## Core Architecture
 
 Enterprise-RAG consists of four layers:
 
-**Agents**: Make decisions and orchestrate workflows
-- Ingestion Agent
-- Retrieval Agent
-- Verification Agent
-- Response Agent
+**Ingestion**: An ingestion supervisor accepts uploads, records document/job
+metadata, and places work on an in-process asyncio queue. A sequential
+`IngestionPipeline` runs parsing, chunking, metadata, embedding, and indexing
+steps. `IngestionAgent` is currently a placeholder and does not make runtime
+decisions.
 
-**Services**: Perform deterministic operations
-- Parsing Service
-- Embedding Service
-- Reranking Service
-- Citation Service
-- Evaluation Service
+**Query**: A separate LangGraph workflow evaluates policy, checks cache,
+retrieves evidence, checks answerability, generates an answer, and verifies
+citations and groundedness. Its `RetrievalAgent` orchestrates specialized
+retrieval services; it is not a central supervisor routing requests between
+independent autonomous agents.
 
-**Infrastructure**: Connect external systems
-- Weaviate (vector storage)
-- Neo4j (knowledge graphs)
-- PostgreSQL (application data)
-- Redis (caching)
-
-**Workflows**: Execute end-to-end pipelines using LangGraph
-- Document ingestion workflow
-- Query and generation workflow
-
-This modular design allows components to be reused across different industries and projects.
+**Infrastructure and services**: PostgreSQL stores application and ingestion
+metadata, Weaviate stores vectors, Neo4j stores graph/structure data, and Redis
+is optional for caching and rate limiting. Parsing, embeddings, reranking,
+generation, citation mapping, and groundedness checks are implemented as
+services. OCR, vision analysis, distributed queueing, and production recovery
+have configuration or reliability limitations described in the deployment
+runbook.
 
 ## API Usage
 

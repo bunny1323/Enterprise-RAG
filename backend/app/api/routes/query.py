@@ -30,6 +30,7 @@ from app.models.query import (
     QueryRequest,
     QueryResponse,
 )
+from app.models.tenant import TenantContext
 from app.services.cache.semantic import SemanticCacheService
 from app.services.cache.service import CacheService
 from app.services.confidence.service import ConfidenceScoringService
@@ -103,6 +104,27 @@ def _build_retrieval_agent(request: Request, postgres, cache_svc) -> RetrievalAg
     )
 
 
+async def _get_permitted_access_levels(
+    request: Request,
+    tenant_ctx: TenantContext,
+) -> list[str]:
+    """Evaluate the same retrieval policy used by the chat workflow."""
+    opa_client = getattr(request.app.state, "opa", None)
+    if opa_client is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Retrieval policy service is unavailable.",
+        )
+
+    decision = await opa_client.evaluate_retrieval_policy(tenant_ctx)
+    if not decision.allowed:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied: {decision.denied_reason}",
+        )
+    return decision.permitted_access_levels
+
+
 @router.post(
     "/chat",
     response_model=QueryResponse,
@@ -169,6 +191,9 @@ async def chat_query(
 
     initial_state = QueryWorkflowState(
         query=query_text,
+        original_query=query_text,
+        normalized_query="",
+        refined_query="",
         tenant_context=tenant_ctx,
         top_k=body.top_k,
         intent="",
@@ -180,6 +205,7 @@ async def chat_query(
         graph_results=[],
         fused_results=[],
         reranked_results=[],
+        retrieved_evidence=[],
         confidence_level="LOW",
         confidence_score=0.0,
         retries=0,
@@ -187,6 +213,10 @@ async def chat_query(
         citations=[],
         sources=[],
         verification_status="UNSUPPORTED",
+        refusal_reason=None,
+        evidence_coverage="UNKNOWN",
+        answerable=False,
+        retrieval_trace={},
         trace_id=trace_id,
         latency_ms=0,
         error_message=None,
@@ -207,7 +237,10 @@ async def chat_query(
         import traceback
         tb = traceback.format_exc()
         logger.error("chat.unhandled_exception", trace_id=trace_id, error=str(err), traceback=tb)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"{str(err)}\n\n{tb}") from err
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Query processing failed. Reference trace ID: {trace_id}.",
+        ) from err
     if final_state.get("error_message"):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=final_state["error_message"])
 
@@ -311,6 +344,7 @@ async def raw_search(
     cache_svc = CacheService(redis_client, postgres) if redis_client else None
 
     retrieval_agent = _build_retrieval_agent(request, postgres, cache_svc)
+    permitted_access_levels = await _get_permitted_access_levels(request, tenant_ctx)
 
     initial_qstate = QueryState(
         query=body.query,
@@ -318,7 +352,10 @@ async def raw_search(
         top_k=body.top_k,
     )
 
-    retrieved_state = await retrieval_agent.retrieve(initial_qstate)
+    retrieved_state = await retrieval_agent.retrieve(
+        initial_qstate,
+        permitted_access_levels=permitted_access_levels,
+    )
 
     latency_ms = int((time.time() - start_time) * 1000)
 
@@ -357,6 +394,7 @@ async def rag_debug(
     cache_svc = CacheService(redis_client, postgres) if redis_client else None
 
     retrieval_agent = _build_retrieval_agent(request, postgres, cache_svc)
+    permitted_access_levels = await _get_permitted_access_levels(request, tenant_ctx)
 
     # Just run the normalizer to detect intent before full retrieval
     from app.services.query.normalization import QueryNormalizationService
@@ -369,7 +407,10 @@ async def rag_debug(
         top_k=body.top_k,
     )
 
-    retrieved_state = await retrieval_agent.retrieve(initial_qstate)
+    retrieved_state = await retrieval_agent.retrieve(
+        initial_qstate,
+        permitted_access_levels=permitted_access_levels,
+    )
 
     latency_ms = int((time.time() - start_time) * 1000)
 
@@ -432,6 +473,7 @@ async def trace_retrieval(
     tenant_ctx: TenantContextDep,
     postgres: PostgresDep,
 ) -> dict:
+    permitted_access_levels = await _get_permitted_access_levels(request, tenant_ctx)
     try:
         redis_client: RedisClient | None = getattr(request.app.state, "redis", None)
         cache_svc = CacheService(redis_client, postgres) if redis_client else None
@@ -439,7 +481,8 @@ async def trace_retrieval(
 
         norm = retrieval_agent._normalizer.normalize(q)
         retrieved_state = await retrieval_agent.retrieve(
-            QueryState(query=q, tenant_context=tenant_ctx, top_k=10)
+            QueryState(query=q, tenant_context=tenant_ctx, top_k=10),
+            permitted_access_levels=permitted_access_levels,
         )
         diagnostics = retrieved_state.retrieval_diagnostics
         channels = diagnostics.get("channels", {})
@@ -524,4 +567,3 @@ async def get_evaluation_metrics() -> dict:
         "context_recall": None,
         "layout_extraction_accuracy": None,
     }
-

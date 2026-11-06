@@ -194,7 +194,7 @@ def get_tenant_context(
                 detail="Forbidden: identity is not authorized to access the requested tenant",
             )
     else:
-        tenant_id = bound_tenant_id or "default"
+        tenant_id = bound_tenant_id
 
     if not tenant_id:
         raise HTTPException(
@@ -302,4 +302,3 @@ WeaviateDep = Annotated[WeaviateClient, Depends(get_weaviate)]
 Neo4jDep = Annotated[Neo4jClient, Depends(get_neo4j)]
 CheckpointerDep = Annotated[Any, Depends(get_checkpointer)]
 SupervisorDep = Annotated[object, Depends(get_supervisor)]
-

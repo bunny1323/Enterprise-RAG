@@ -7,7 +7,7 @@ Default-deny approach when security metadata is missing.
 from typing import Any
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.config.logging import get_logger
 from app.models.tenant import TenantContext
@@ -19,8 +19,8 @@ class PolicyDecision(BaseModel):
     """Result of OPA policy evaluation."""
 
     allowed: bool
-    permitted_access_levels: list[str] = ["PUBLIC", "INTERNAL"]
-    permitted_tenants: list[str] = []
+    permitted_access_levels: list[str] = Field(default_factory=lambda: ["PUBLIC", "INTERNAL"])
+    permitted_tenants: list[str] = Field(default_factory=list)
     denied_reason: str | None = None
 
 
@@ -29,9 +29,14 @@ class OPAClient:
     HTTP client for evaluating policies via OPA's REST API.
     """
 
-    def __init__(self, opa_url: str = "http://localhost:8181") -> None:
+    def __init__(
+        self,
+        opa_url: str = "http://localhost:8181",
+        auth_token: str = "",
+    ) -> None:
         self._opa_url = opa_url.rstrip("/")
-        self._http = httpx.AsyncClient(timeout=5.0)
+        headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
+        self._http = httpx.AsyncClient(timeout=5.0, headers=headers)
 
     async def evaluate_retrieval_policy(
         self,
@@ -41,8 +46,8 @@ class OPAClient:
         """
         Evaluate OPA policy for retrieval access.
 
-        If OPA server is unreachable or unconfigured, falls back to safe default-deny
-        or strict claim-based access level filter.
+        A missing, unreachable, malformed, or non-successful policy response denies
+        retrieval. Claims never substitute for a failed policy decision.
         """
         payload = {
             "input": {
@@ -61,54 +66,88 @@ class OPAClient:
                 f"{self._opa_url}/v1/data/rag/authz/allow",
                 json=payload,
             )
-            if resp.status_code == 200:
-                res_json = resp.json()
-                result = res_json.get("result", {})
-                if isinstance(result, bool):
-                    allowed = result
-                    permitted = (
-                        ["PUBLIC", "INTERNAL", "RESTRICTED"]
-                        if ctx.access_level == "RESTRICTED"
-                        else ["PUBLIC", "INTERNAL"]
-                    )
-                else:
-                    allowed = result.get("allowed", False)
-                    permitted = result.get("permitted_access_levels", ["PUBLIC", "INTERNAL"])
-
-                logger.info(
-                    "opa.evaluated",
-                    allowed=allowed,
+            if resp.status_code != 200:
+                logger.error(
+                    "opa.policy_request_rejected",
+                    status_code=resp.status_code,
                     tenant=ctx.tenant_id,
-                    user=ctx.user_id,
                 )
                 return PolicyDecision(
-                    allowed=allowed,
-                    permitted_access_levels=permitted,
-                    permitted_tenants=[ctx.tenant_id],
+                    allowed=False,
+                    permitted_access_levels=[],
+                    denied_reason="policy_engine_unavailable",
                 )
-        except Exception as err:
-            logger.warning("opa.unreachable_fallback_used", error=str(err))
 
-        # Safe fallback based on verified context claims (default-deny for RESTRICTED if unauthenticated)
-        is_verified_admin = bool(
-            ctx.claims.get("is_admin") is True
-            or ctx.claims.get("role") == "admin"
-            or ctx.claims.get("verified_admin") is True
-        )
+            res_json = resp.json()
+            result = res_json.get("result") if isinstance(res_json, dict) else None
+            if isinstance(result, bool):
+                allowed = result
+                is_admin = ctx.claims.get("is_admin") is True
+                permitted = (
+                    ["PUBLIC", "INTERNAL", "RESTRICTED"]
+                    if is_admin and ctx.access_level == "RESTRICTED"
+                    else ["PUBLIC", "INTERNAL"]
+                    if ctx.access_level == "INTERNAL"
+                    else ["PUBLIC"]
+                )
+                denied_reason = None
+            elif isinstance(result, dict):
+                allowed = result.get("allowed") is True
+                raw_permitted = result.get("permitted_access_levels", [])
+                permitted = (
+                    [level for level in raw_permitted if level in {"PUBLIC", "INTERNAL", "RESTRICTED"}]
+                    if isinstance(raw_permitted, list)
+                    else []
+                )
+                denied_reason = result.get("denied_reason")
+            else:
+                return PolicyDecision(
+                    allowed=False,
+                    permitted_access_levels=[],
+                    denied_reason="invalid_policy_response",
+                )
 
-        if ctx.access_level == "RESTRICTED" and is_verified_admin:
-            permitted_levels = ["PUBLIC", "INTERNAL", "RESTRICTED"]
-        elif ctx.access_level in ("INTERNAL", "RESTRICTED"):
-            permitted_levels = ["PUBLIC", "INTERNAL"]
-        else:
-            permitted_levels = ["PUBLIC"]
+            if not allowed or not permitted:
+                return PolicyDecision(
+                    allowed=False,
+                    permitted_access_levels=[],
+                    denied_reason=denied_reason or "policy_denied",
+                )
 
-        return PolicyDecision(
-            allowed=True,
-            permitted_access_levels=permitted_levels,
-            permitted_tenants=[ctx.tenant_id],
-        )
+            logger.info(
+                "opa.evaluated",
+                allowed=True,
+                tenant=ctx.tenant_id,
+                user=ctx.user_id,
+            )
+            return PolicyDecision(
+                allowed=True,
+                permitted_access_levels=permitted,
+                permitted_tenants=[ctx.tenant_id],
+            )
+        except (httpx.HTTPError, ValueError, TypeError) as err:
+            logger.error("opa.policy_evaluation_failed", error=str(err))
+            return PolicyDecision(
+                allowed=False,
+                permitted_access_levels=[],
+                denied_reason="policy_engine_unavailable",
+            )
 
     async def close(self) -> None:
         """Close HTTP client."""
         await self._http.aclose()
+
+    async def health_check(self) -> bool:
+        """Check that the configured policy service is reachable."""
+        try:
+            response = await self._http.get(f"{self._opa_url}/health")
+        except httpx.HTTPError as err:
+            logger.error("opa.health_check_failed", error=str(err))
+            return False
+        if response.status_code != 200:
+            logger.error(
+                "opa.health_check_failed",
+                status_code=response.status_code,
+            )
+            return False
+        return True

@@ -216,6 +216,9 @@ class RetrievalAgent:
         """
         ctx = query_state.tenant_context
         norm = self._normalizer.normalize(query_state.query)
+        query_state = query_state.model_copy(
+            update={"normalized_query": norm.clean_query}
+        )
         intent = norm.intent
 
         with tracer.start_as_current_span("RetrievalAgent.retrieve") as span:
@@ -250,7 +253,11 @@ class RetrievalAgent:
             # ── 1. STRUCTURAL RETRIEVAL FAST-PATH ─────────────────────────────
             # For COUNT_QUERY and LIST_QUERY (e.g., "How many major sections...",
             # "What are the major sections?"), query the canonical document_structure index.
-            if self._structure_svc:
+            structure_access_allowed = (
+                permitted_access_levels is None
+                or "INTERNAL" in permitted_access_levels
+            )
+            if self._structure_svc and structure_access_allowed:
                 if intent == "COUNT_QUERY":
                     count = await self._structure_svc.count_sections(
                         tenant_id=ctx.tenant_id,
@@ -326,10 +333,16 @@ class RetrievalAgent:
             # 1. Generate query embedding (with caching)
             query_vec = None
             if self._cache_svc:
-                query_vec = await self._cache_svc.get_query_embedding(
-                    ctx,
-                    norm.clean_query,
-                )
+                try:
+                    query_vec = await self._cache_svc.get_query_embedding(
+                        ctx,
+                        norm.clean_query,
+                    )
+                except Exception as err:
+                    logger.exception(
+                        "retrieval_agent.embedding_cache_lookup_failed",
+                        error=str(err),
+                    )
 
             if not query_vec:
                 # LocalEmbeddingProvider is synchronous, so run embedding in executor.
@@ -344,11 +357,17 @@ class RetrievalAgent:
                 query_vec = query_vectors[0] if query_vectors else []
 
                 if query_vec and self._cache_svc:
-                    await self._cache_svc.set_query_embedding(
-                        ctx,
-                        norm.clean_query,
-                        query_vec,
-                    )
+                    try:
+                        await self._cache_svc.set_query_embedding(
+                            ctx,
+                            norm.clean_query,
+                            query_vec,
+                        )
+                    except Exception as err:
+                        logger.exception(
+                            "retrieval_agent.embedding_cache_store_failed",
+                            error=str(err),
+                        )
 
             # 2. Parallel retrieval channels
             extra_ranked_lists: list[list[SearchResult]] = []
@@ -425,6 +444,7 @@ class RetrievalAgent:
                     entity_name=entity_query,
                     tenant_id=ctx.tenant_id,
                     knowledge_base_id=ctx.knowledge_base_id,
+                    permitted_access_levels=permitted_access_levels,
                 )
 
             main_task_names = list(tasks)

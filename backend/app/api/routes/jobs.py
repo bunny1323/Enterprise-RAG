@@ -1,16 +1,13 @@
 """
 Ingestion Job API routes.
-GET  /api/v1/jobs/{job_id}          — poll job status, stage checkpoints, progress
+GET  /api/v1/jobs/{job_id}          — poll job status and progress
 POST /api/v1/jobs/{job_id}/cancel   — cancel an active ingestion job
-POST /api/v1/jobs/{job_id}/retry    — retry a failed/cancelled job from last checkpoint
 """
 import uuid
 from datetime import datetime, timezone
-from typing import Annotated
-
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.api.dependencies import PostgresDep, SupervisorDep, TenantContextDep
+from app.api.dependencies import PostgresDep, TenantContextDep
 from app.config.logging import get_logger
 from app.models.job import IngestionJob, JobStatus
 
@@ -44,6 +41,7 @@ async def get_job_status(
         """
         SELECT job_id, document_id, tenant_id, assistant_id, knowledge_base_id,
                status, current_stage, progress_percent, retry_count,
+               attempt_count, max_attempts,
                last_successful_stage, stage_checkpoints, error_message,
                created_at, started_at, completed_at, timeout_at, cancelled_at, metadata
         FROM ingestion_jobs
@@ -76,10 +74,12 @@ async def get_job_status(
         tenant_id=row["tenant_id"],
         assistant_id=row["assistant_id"],
         knowledge_base_id=row["knowledge_base_id"],
-        status=JobStatus(row["status"]) if row["status"] in JobStatus.__members__ else JobStatus.FAILED,
+        status=JobStatus(row["status"]),
         current_stage=row["current_stage"],
         progress_percent=row["progress_percent"],
         retry_count=row["retry_count"],
+        attempt_count=row["attempt_count"],
+        max_attempts=row["max_attempts"],
         last_successful_stage=row["last_successful_stage"],
         stage_checkpoints=checkpoints,
         error_message=row["error_message"],
@@ -127,21 +127,35 @@ async def cancel_job(
         )
 
     now = datetime.now(timezone.utc)
-    await postgres.execute(
+    cancelled = await postgres.fetchrow(
         """
-        UPDATE ingestion_jobs
-        SET status = $1, cancelled_at = $2, completed_at = $2
-        WHERE job_id = $3
+        WITH cancelled AS (
+            UPDATE ingestion_jobs
+            SET status = $1, cancelled_at = $2, completed_at = $2
+            WHERE job_id = $3
+              AND tenant_id = $4
+              AND knowledge_base_id = $5
+              AND status NOT IN (
+                  'COMPLETED', 'DUPLICATE', 'FAILED', 'CANCELLED', 'QUARANTINED'
+              )
+            RETURNING document_id
+        )
+        UPDATE documents
+        SET status = 'CANCELLED', completed_at = $2
+        WHERE id = (SELECT document_id FROM cancelled)
+        RETURNING id
         """,
         JobStatus.CANCELLED.value,
         now,
         j_uuid,
+        tenant_ctx.tenant_id,
+        tenant_ctx.knowledge_base_id,
     )
-    await postgres.execute(
-        "UPDATE documents SET status = 'CANCELLED', completed_at = $1 WHERE id = $2",
-        now,
-        row["document_id"],
-    )
+    if cancelled is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Job {job_id} is already terminal and cannot be cancelled",
+        )
 
     logger.info("job.cancelled", job_id=job_id, document_id=str(row["document_id"]))
     return {"job_id": job_id, "status": JobStatus.CANCELLED.value}

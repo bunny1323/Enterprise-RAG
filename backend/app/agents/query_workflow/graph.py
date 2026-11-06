@@ -2,13 +2,18 @@
 LangGraph StateGraph definition.
 """
 from typing import Literal
-from langgraph.graph import StateGraph, END
+
 from langgraph.checkpoint.base import BaseCheckpointSaver
-from app.agents.query_workflow.state import QueryWorkflowState
+from langgraph.graph import END, StateGraph
+
 from app.agents.query_workflow.nodes import QueryNodes
+from app.agents.query_workflow.state import QueryWorkflowState
 from app.config.logging import get_logger
 
 logger = get_logger(__name__)
+
+MAX_QUERY_RETRIES = 2
+MAX_LOW_CONFIDENCE_RETRIES = 1
 
 
 def build_query_graph(nodes: QueryNodes, checkpointer: BaseCheckpointSaver | None = None) -> StateGraph:
@@ -47,19 +52,18 @@ def build_query_graph(nodes: QueryNodes, checkpointer: BaseCheckpointSaver | Non
 
         conf = state.get("confidence_level", "LOW")
         retries = state.get("retries", 0)
-        
-        if conf == "LOW" and retries < 1:
+
+        if conf == "LOW" and retries < MAX_LOW_CONFIDENCE_RETRIES:
             return "refine"
         return "generate"
 
-    def route_after_verify(state: QueryWorkflowState) -> Literal["__end__", "retrieve"]:
+    def route_after_verify(state: QueryWorkflowState) -> Literal["__end__", "refine"]:
         status = state.get("verification_status", "UNSUPPORTED")
         retries = state.get("retries", 0)
-        
-        if status == "PARTIALLY_SUPPORTED" and retries < 2:
-            # We can trigger a refinement loop
-            return "retrieve"
-            
+
+        if status == "PARTIALLY_SUPPORTED" and retries < MAX_QUERY_RETRIES:
+            return "refine"
+
         return END
 
     # Edges
@@ -67,10 +71,10 @@ def build_query_graph(nodes: QueryNodes, checkpointer: BaseCheckpointSaver | Non
     workflow.add_conditional_edges("cache", route_after_cache)
     workflow.add_edge("retrieve", "answerability")
     workflow.add_conditional_edges("answerability", route_after_answerability)
-    
+
     # Refinement just loops back to retrieval
     workflow.add_edge("refine", "retrieve")
-    
+
     workflow.add_edge("generate", "verify")
     workflow.add_conditional_edges("verify", route_after_verify)
 

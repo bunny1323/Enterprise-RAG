@@ -1,6 +1,6 @@
 """
 Document API routes.
-POST /api/v1/documents      — upload PDF, get document_id in <100ms
+POST /api/v1/documents      — persist PDF and register an asynchronous ingestion job
 GET  /api/v1/documents/{id}/status — poll ingestion status
 """
 import uuid
@@ -22,7 +22,7 @@ router = APIRouter(prefix="/api/v1/documents", tags=["documents"])
     "",
     status_code=status.HTTP_202_ACCEPTED,
     summary="Upload a PDF document for ingestion",
-    response_description="Document ID and initial PENDING status",
+    response_description="Document ID, job ID, and initial RECEIVED status",
 )
 async def upload_document(
     file: UploadFile,
@@ -33,8 +33,9 @@ async def upload_document(
     """
     Accept a PDF upload and queue it for asynchronous ingestion.
 
-    Returns immediately with document_id in <100ms.
-    Poll GET /api/v1/documents/{id}/status for progress.
+    Persists the upload and registers its document/job records before returning.
+    Parsing and indexing run asynchronously; poll the document status or job
+    endpoint for progress. No fixed response-latency guarantee is made.
 
     - **file**: Multipart PDF file (max 100 MB)
     - **industry**: Industry domain for metadata enrichment (default: manufacturing)

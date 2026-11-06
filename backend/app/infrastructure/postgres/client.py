@@ -73,6 +73,11 @@ CREATE TABLE IF NOT EXISTS ingestion_jobs (
     current_stage         TEXT,
     progress_percent      INTEGER     DEFAULT 0,
     retry_count           INTEGER     DEFAULT 0,
+    attempt_count         INTEGER     NOT NULL DEFAULT 0,
+    max_attempts          INTEGER     NOT NULL DEFAULT 3,
+    worker_id             TEXT,
+    lease_expires_at       TIMESTAMPTZ,
+    heartbeat_at           TIMESTAMPTZ,
     last_successful_stage TEXT,
     stage_checkpoints     JSONB       DEFAULT '{}',
     error_message         TEXT,
@@ -209,8 +214,271 @@ class PostgresClient:
         """
         await self._initialize_base_schema()
         await self._apply_column_migrations()
+        await self._apply_ingestion_queue_migrations()
         await self._apply_indexes_and_constraints()
         logger.info("postgres.schema_initialized")
+
+    async def _apply_ingestion_queue_migrations(self) -> None:
+        """Apply required lease columns and index; queue coordination fails closed."""
+        for statement in (
+            "ALTER TABLE ingestion_jobs ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE ingestion_jobs ADD COLUMN IF NOT EXISTS max_attempts INTEGER NOT NULL DEFAULT 3",
+            "ALTER TABLE ingestion_jobs ADD COLUMN IF NOT EXISTS worker_id TEXT",
+            "ALTER TABLE ingestion_jobs ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ",
+            "ALTER TABLE ingestion_jobs ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ",
+            """
+            CREATE INDEX IF NOT EXISTS idx_jobs_claimable
+            ON ingestion_jobs (created_at, lease_expires_at)
+            WHERE status NOT IN ('COMPLETED', 'DUPLICATE', 'CANCELLED', 'QUARANTINED')
+            """,
+        ):
+            await self.execute(statement)
+
+    async def register_ingestion(
+        self,
+        *,
+        sha256: str,
+        file_name: str,
+        storage_path: str,
+        industry: str,
+        tenant_id: str,
+        assistant_id: str,
+        knowledge_base_id: str,
+        max_attempts: int = 3,
+    ) -> dict[str, UUID]:
+        """Create a document and its required ingestion job atomically."""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                doc_row = await conn.fetchrow(
+                    """
+                    INSERT INTO documents (
+                        sha256, file_name, storage_path, industry,
+                        tenant_id, assistant_id, knowledge_base_id, status
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, 'PENDING')
+                    RETURNING id
+                    """,
+                    sha256,
+                    file_name,
+                    storage_path,
+                    industry,
+                    tenant_id,
+                    assistant_id,
+                    knowledge_base_id,
+                )
+                document_id = doc_row["id"]
+                job_row = await conn.fetchrow(
+                    """
+                    INSERT INTO ingestion_jobs (
+                        document_id, tenant_id, assistant_id, knowledge_base_id,
+                        status, max_attempts
+                    )
+                    VALUES ($1, $2, $3, $4, 'RECEIVED', $5)
+                    RETURNING job_id
+                    """,
+                    document_id,
+                    tenant_id,
+                    assistant_id,
+                    knowledge_base_id,
+                    max_attempts,
+                )
+                return {"document_id": document_id, "job_id": job_row["job_id"]}
+
+    async def claim_ingestion_job(
+        self,
+        worker_id: str,
+        lease_seconds: int,
+    ) -> dict[str, Any] | None:
+        """Atomically claim one available or lease-expired job using SKIP LOCKED."""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    """
+                    WITH exhausted AS (
+                        UPDATE ingestion_jobs
+                        SET status = 'FAILED',
+                            error_message = COALESCE(
+                                error_message,
+                                'Worker lease expired after maximum attempts'
+                            ),
+                            completed_at = NOW(),
+                            worker_id = NULL,
+                            lease_expires_at = NULL,
+                            heartbeat_at = NULL
+                        WHERE attempt_count >= max_attempts
+                          AND (
+                              lease_expires_at <= NOW()
+                              OR (
+                                  lease_expires_at IS NULL
+                                  AND status IN (
+                                      'PROCESSING', 'VALIDATING', 'CHECKING_DUPLICATE',
+                                      'PARSING', 'OCR', 'VISION', 'CHUNKING',
+                                      'METADATA', 'EMBEDDING', 'INDEXING', 'PARTIAL'
+                                  )
+                              )
+                          )
+                          AND status NOT IN (
+                              'COMPLETED', 'DUPLICATE', 'CANCELLED', 'QUARANTINED'
+                          )
+                        RETURNING document_id, error_message
+                    )
+                    UPDATE documents AS document
+                    SET status = 'FAILED',
+                        error_message = exhausted.error_message,
+                        completed_at = NOW()
+                    FROM exhausted
+                    WHERE document.id = exhausted.document_id
+                    """
+                )
+                return await conn.fetchrow(
+                    """
+                    WITH candidate AS (
+                        SELECT job_id
+                        FROM ingestion_jobs
+                        WHERE attempt_count < max_attempts
+                          AND (
+                              status IN ('RECEIVED', 'RETRY_WAIT')
+                              OR (
+                                  status NOT IN (
+                                      'COMPLETED', 'DUPLICATE',
+                                      'CANCELLED', 'QUARANTINED'
+                                  )
+                                  AND (
+                                      lease_expires_at <= NOW()
+                                      OR (
+                                          lease_expires_at IS NULL
+                                          AND status IN (
+                                              'PROCESSING', 'VALIDATING', 'CHECKING_DUPLICATE',
+                                              'PARSING', 'OCR', 'VISION', 'CHUNKING',
+                                              'METADATA', 'EMBEDDING', 'INDEXING', 'PARTIAL'
+                                          )
+                                      )
+                                  )
+                              )
+                          )
+                        ORDER BY created_at
+                        FOR UPDATE SKIP LOCKED
+                        LIMIT 1
+                    ),
+                    claimed AS (
+                        UPDATE ingestion_jobs AS job
+                        SET status = 'PROCESSING',
+                            worker_id = $1,
+                            attempt_count = attempt_count + 1,
+                            heartbeat_at = NOW(),
+                            lease_expires_at = NOW() + ($2 * INTERVAL '1 second'),
+                            started_at = COALESCE(started_at, NOW()),
+                            completed_at = NULL,
+                            error_message = NULL
+                        FROM candidate
+                        WHERE job.job_id = candidate.job_id
+                        RETURNING job.*
+                    )
+                    SELECT claimed.*, document.file_name, document.storage_path,
+                           document.industry, document.status AS document_status
+                    FROM claimed
+                    JOIN documents AS document ON document.id = claimed.document_id
+                    """,
+                    worker_id,
+                    lease_seconds,
+                )
+
+    async def renew_ingestion_lease(
+        self,
+        job_id: UUID,
+        worker_id: str,
+        lease_seconds: int,
+    ) -> bool:
+        """Extend a worker's lease only while it still owns the job."""
+        updated = await self.fetchrow(
+            """
+            UPDATE ingestion_jobs
+            SET heartbeat_at = NOW(),
+                lease_expires_at = NOW() + ($3 * INTERVAL '1 second')
+            WHERE job_id = $1 AND worker_id = $2
+              AND status NOT IN ('COMPLETED', 'DUPLICATE', 'FAILED', 'CANCELLED', 'QUARANTINED')
+            RETURNING job_id
+            """,
+            job_id,
+            worker_id,
+            lease_seconds,
+        )
+        return updated is not None
+
+    async def release_ingestion_claim(self, job_id: UUID, worker_id: str) -> None:
+        """Release a completed/cancelled claim without changing its final status."""
+        await self.execute(
+            """
+            UPDATE ingestion_jobs
+            SET worker_id = NULL, lease_expires_at = NULL, heartbeat_at = NULL
+            WHERE job_id = $1 AND worker_id = $2
+            """,
+            job_id,
+            worker_id,
+        )
+
+    async def record_ingestion_failure(
+        self,
+        job_id: UUID,
+        document_id: UUID,
+        worker_id: str,
+        error_message: str,
+        force_fail: bool = False,
+    ) -> bool:
+        """Persist a bounded retry transition or a final failure atomically."""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    UPDATE ingestion_jobs
+                    SET status = CASE
+                            WHEN attempt_count < max_attempts AND NOT $5 THEN 'RETRY_WAIT'
+                            ELSE 'FAILED'
+                        END,
+                        error_message = $4,
+                        completed_at = CASE
+                            WHEN attempt_count < max_attempts AND NOT $5 THEN NULL
+                            ELSE NOW()
+                        END,
+                        current_stage = CASE
+                            WHEN attempt_count < max_attempts AND NOT $5 THEN NULL
+                            ELSE current_stage
+                        END,
+                        progress_percent = CASE
+                            WHEN attempt_count < max_attempts AND NOT $5 THEN 0
+                            ELSE progress_percent
+                        END,
+                        worker_id = NULL,
+                        lease_expires_at = NULL,
+                        heartbeat_at = NULL,
+                        retry_count = retry_count + 1
+                    WHERE job_id = $1 AND document_id = $2 AND worker_id = $3
+                    RETURNING status
+                    """,
+                    job_id,
+                    document_id,
+                    worker_id,
+                    error_message[:2000],
+                    force_fail,
+                )
+                if row is None:
+                    return False
+
+                retrying = row["status"] == "RETRY_WAIT"
+                await conn.execute(
+                    """
+                    UPDATE documents
+                    SET status = $2,
+                        error_message = $3,
+                        progress_percent = CASE WHEN $2 = 'PENDING' THEN 0 ELSE progress_percent END,
+                        completed_at = CASE WHEN $2 = 'FAILED' THEN NOW() ELSE NULL END
+                    WHERE id = $1
+                    """,
+                    document_id,
+                    "PENDING" if retrying else "FAILED",
+                    error_message[:2000],
+                )
+                return retrying
         
     async def _initialize_base_schema(self) -> None:
         """Create tables if they do not exist."""
@@ -286,33 +554,41 @@ class PostgresClient:
 
     async def _apply_tenant_uniqueness_constraint(self) -> None:
         """
-        Apply or defer the tenant-scoped uniqueness constraint on (tenant_id, sha256).
+        Apply or defer the tenant/knowledge-base uniqueness constraint on
+        (tenant_id, knowledge_base_id, sha256).
         
         If duplicates exist, logs them and defers the constraint without modifying data.
         Runtime checks in ingestion pipeline enforce uniqueness for new uploads.
         """
+        await self.execute(
+            "ALTER TABLE documents DROP CONSTRAINT IF EXISTS documents_tenant_sha256_key"
+        )
         try:
             # Check for existing constraint
             constraint_exists = await self.fetchval(
                 """SELECT EXISTS(
                     SELECT 1 FROM information_schema.table_constraints 
                     WHERE table_name = 'documents' 
-                    AND constraint_name = 'documents_tenant_sha256_key'
+                    AND constraint_name = 'documents_tenant_kb_sha256_key'
                     AND constraint_type = 'UNIQUE'
                 )"""
             )
             if constraint_exists:
-                logger.info("postgres.constraint_already_exists", constraint="documents_tenant_sha256_key")
+                logger.info(
+                    "postgres.constraint_already_exists",
+                    constraint="documents_tenant_kb_sha256_key",
+                )
                 return
         except Exception as err:
             logger.warning("postgres.constraint_check_failed", error=str(err))
         
-        # Check for duplicate (tenant_id, sha256) pairs in existing data
+        # Check for duplicate (tenant_id, knowledge_base_id, sha256) tuples.
         try:
             duplicates = await self.fetch(
-                """SELECT tenant_id, sha256, COUNT(*) as cnt, ARRAY_AGG(id::TEXT) as doc_ids
+                """SELECT tenant_id, knowledge_base_id, sha256,
+                          COUNT(*) as cnt, ARRAY_AGG(id::TEXT) as doc_ids
                    FROM documents 
-                   GROUP BY tenant_id, sha256 
+                   GROUP BY tenant_id, knowledge_base_id, sha256
                    HAVING COUNT(*) > 1
                    ORDER BY cnt DESC"""
             )
@@ -324,6 +600,7 @@ class PostgresClient:
                     duplicates=[
                         {
                             "tenant_id": row["tenant_id"],
+                            "knowledge_base_id": row["knowledge_base_id"],
                             "sha256": row["sha256"],
                             "num_documents": row["cnt"],
                             "document_ids": row["doc_ids"]
@@ -344,13 +621,17 @@ class PostgresClient:
         try:
             await self.execute("ALTER TABLE documents DROP CONSTRAINT IF EXISTS documents_sha256_key")
             await self.execute(
-                "ALTER TABLE documents ADD CONSTRAINT documents_tenant_sha256_key UNIQUE (tenant_id, sha256)"
+                "ALTER TABLE documents ADD CONSTRAINT documents_tenant_kb_sha256_key "
+                "UNIQUE (tenant_id, knowledge_base_id, sha256)"
             )
-            logger.info("postgres.uniqueness_constraint_added", constraint="documents_tenant_sha256_key")
+            logger.info(
+                "postgres.uniqueness_constraint_added",
+                constraint="documents_tenant_kb_sha256_key",
+            )
         except Exception as err:
             logger.error(
                 "postgres.constraint_addition_failed",
-                constraint="documents_tenant_sha256_key",
+                constraint="documents_tenant_kb_sha256_key",
                 error=str(err),
                 mitigation="Runtime ingestion checks will enforce uniqueness; operator must resolve duplicates"
             )

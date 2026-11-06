@@ -43,6 +43,10 @@ class PipelineCancelledException(Exception):
     pass
 
 
+class PartialIndexingError(RuntimeError):
+    """Raised after persisting partial writes so the durable worker can retry them."""
+
+
 class IngestionPipeline:
     """
     Sequential pipeline that executes ingestion steps and tracks database progress.
@@ -186,6 +190,11 @@ class IngestionPipeline:
                 )
                 await self._update_failed_status(postgres, doc_id, job_id, str(err)[:2000])
                 raise
+
+        if state.status == DocumentStatus.PARTIAL:
+            raise PartialIndexingError(
+                state.error_message or "One or more indexing backends did not complete"
+            )
 
         logger.info("pipeline.complete", document_id=str(doc_id))
         return doc_id
@@ -358,4 +367,3 @@ class IngestionPipeline:
                 now,
                 job_id,
             )
-

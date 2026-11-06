@@ -51,15 +51,29 @@ def _semantic_cache_namespace(
     model: str = "default",
     prompt_version: str = "v1",
     retrieval_profile: str = "default",
+    permitted_access_levels: list[str] | None = None,
 ) -> str:
     """
     Build a namespace key that isolates cache entries by security context.
     All dimensions that could change the meaning or permissible scope of an answer
     must be included here.
     """
+    policy_scope = json.dumps(
+        {
+            "user_id": ctx.user_id,
+            "claims": ctx.claims,
+            "permitted_access_levels": sorted(
+                set(permitted_access_levels or [ctx.access_level])
+            ),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    scope_hash = hashlib.sha256(policy_scope.encode("utf-8")).hexdigest()[:16]
     raw = (
         f"{ctx.tenant_id}::{ctx.assistant_id}::{ctx.knowledge_base_id}::"
-        f"v{kb_version}::{ctx.access_level}::{model}::{prompt_version}::{retrieval_profile}"
+        f"v{kb_version}::{ctx.access_level}::{scope_hash}::{model}::{prompt_version}::{retrieval_profile}"
     )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
@@ -98,13 +112,21 @@ class SemanticCacheService:
         model: str = "default",
         prompt_version: str = "v1",
         retrieval_profile: str = "default",
+        permitted_access_levels: list[str] | None = None,
     ) -> dict | None:
         """
         Try to find a semantically similar cached response.
 
         Returns the cached response dict if found, else None.
         """
-        namespace = _semantic_cache_namespace(ctx, kb_version, model, prompt_version, retrieval_profile)
+        namespace = _semantic_cache_namespace(
+            ctx,
+            kb_version,
+            model,
+            prompt_version,
+            retrieval_profile,
+            permitted_access_levels,
+        )
         index_key = f"{_SEM_CACHE_PREFIX}:{namespace}:index"
 
         raw_index = await self._redis.get(index_key)
@@ -159,12 +181,20 @@ class SemanticCacheService:
         model: str = "default",
         prompt_version: str = "v1",
         retrieval_profile: str = "default",
+        permitted_access_levels: list[str] | None = None,
     ) -> None:
         """
         Store a new semantic cache entry.
         Uses a fixed-size rolling index; oldest entries are evicted when at capacity.
         """
-        namespace = _semantic_cache_namespace(ctx, kb_version, model, prompt_version, retrieval_profile)
+        namespace = _semantic_cache_namespace(
+            ctx,
+            kb_version,
+            model,
+            prompt_version,
+            retrieval_profile,
+            permitted_access_levels,
+        )
         index_key = f"{_SEM_CACHE_PREFIX}:{namespace}:index"
 
         # Build response key from embedding hash for deduplication
@@ -206,11 +236,19 @@ class SemanticCacheService:
         model: str = "default",
         prompt_version: str = "v1",
         retrieval_profile: str = "default",
+        permitted_access_levels: list[str] | None = None,
     ) -> None:
         """
         Remove all cache entries for a namespace (e.g., when knowledge base updates).
         """
-        namespace = _semantic_cache_namespace(ctx, kb_version, model, prompt_version, retrieval_profile)
+        namespace = _semantic_cache_namespace(
+            ctx,
+            kb_version,
+            model,
+            prompt_version,
+            retrieval_profile,
+            permitted_access_levels,
+        )
         index_key = f"{_SEM_CACHE_PREFIX}:{namespace}:index"
 
         raw_index = await self._redis.get(index_key)
