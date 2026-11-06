@@ -78,7 +78,14 @@ async def test_exact_duplicate():
     )
     postgres = AsyncMock()
     # Mock check_file_hash to return an existing row
-    postgres.fetchrow.return_value = {"id": str(canonical_id), "sha256": "hash", "file_name": "x", "version": 1, "content_hash": "c"}
+    postgres.fetchrow.return_value = {
+        "id": str(canonical_id),
+        "sha256": "hash",
+        "file_name": "x",
+        "version": 1,
+        "content_hash": "c",
+        "chunk_count": 1,
+    }
     
     s02_duplicate.compute_sha256 = MagicMock(return_value="hash")
     
@@ -133,8 +140,23 @@ async def test_concurrent_upload_unique_violation():
     # check_file_hash initially returns None
     # Then execute raises UniqueViolationError on the document update
     # Then check_file_hash returns the winner row
-    postgres.fetchrow.side_effect = [None, {"id": str(winner_id), "sha256": "hash", "file_name": "x", "version": 1, "content_hash": "c"}]
-    postgres.execute.side_effect = [None, asyncpg.exceptions.UniqueViolationError(), None]
+    postgres.fetchrow.side_effect = [
+        None,
+        {
+            "id": str(winner_id),
+            "sha256": "hash",
+            "file_name": "x",
+            "version": 1,
+            "content_hash": "c",
+            "chunk_count": 1,
+        },
+    ]
+    postgres.execute.side_effect = [
+        None,
+        asyncpg.exceptions.UniqueViolationError(),
+        None,
+        None,
+    ]
     
     s02_duplicate.compute_sha256 = MagicMock(return_value="hash")
     
@@ -167,10 +189,14 @@ async def test_incomplete_canonical_document_zero_chunks():
     result = await dedup_svc.check_file_hash(
         sha256="corrupt_sha",
         tenant_id="tenant_1",
+        knowledge_base_id="kb-1",
         current_doc_id=uuid4(),
         postgres=postgres,
     )
     assert result is None, "Corrupted canonical document with 0 chunks must NOT be accepted as duplicate"
+    query, _, _, kb_id, _ = postgres.fetchrow.await_args.args
+    assert "d.knowledge_base_id = $3" in query
+    assert kb_id == "kb-1"
 
 
 @pytest.mark.asyncio
@@ -196,6 +222,7 @@ async def test_valid_completed_duplicate_with_chunks():
     result = await dedup_svc.check_file_hash(
         sha256="valid_sha",
         tenant_id="tenant_1",
+        knowledge_base_id="kb-1",
         current_doc_id=uuid4(),
         postgres=postgres,
     )
@@ -258,4 +285,3 @@ def test_document_status_response_duplicate_fields():
     d = resp.model_dump()
     assert d["canonical_document_id"] == canon_id
     assert d["is_duplicate"] is True
-

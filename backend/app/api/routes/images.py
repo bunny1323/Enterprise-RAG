@@ -3,6 +3,7 @@ Authenticated and tenant-isolated image serving endpoint.
 Replaces public StaticFiles mount to enforce document-level authorization.
 """
 from pathlib import Path
+
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import FileResponse
 
@@ -44,6 +45,16 @@ async def get_document_image(
     5. Returns HTTP 404 for missing files, invalid paths, AND unauthorized access
        to prevent enumeration/existence probing of other tenants' data.
     """
+    if not getattr(settings, "opa_enabled", True):
+        logger.warning(
+            "security.image_access_denied_opa_disabled",
+            tenant_id=tenant_ctx.tenant_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Image access is disabled while OPA is off; only PUBLIC text retrieval is available.",
+        )
+
     ext = Path(image_path).suffix.lower()
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image not found")

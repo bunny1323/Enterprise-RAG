@@ -31,13 +31,19 @@ class DenseSearchService:
         """
         if not query_vector:
             return []
+        if permitted_access_levels == []:
+            return []
 
         raw_results = self._weaviate.vector_search(
             query_vector=query_vector,
             top_k=top_k,
             tenant_id=tenant_id,
             knowledge_base_id=knowledge_base_id,
-            permitted_access_levels=permitted_access_levels or ["PUBLIC", "INTERNAL"],
+            permitted_access_levels=(
+                permitted_access_levels
+                if permitted_access_levels is not None
+                else ["PUBLIC", "INTERNAL"]
+            ),
         )
 
         results: list[SearchResult] = []

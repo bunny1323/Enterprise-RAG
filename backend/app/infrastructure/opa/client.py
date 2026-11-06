@@ -4,7 +4,6 @@ Note: OPA is NOT authentication. It evaluates already-authenticated claims
 and returns permitted access filters for retrieval (e.g. permitted_access_levels).
 Default-deny approach when security metadata is missing.
 """
-from typing import Any
 
 import httpx
 from pydantic import BaseModel, Field
@@ -19,7 +18,7 @@ class PolicyDecision(BaseModel):
     """Result of OPA policy evaluation."""
 
     allowed: bool
-    permitted_access_levels: list[str] = Field(default_factory=lambda: ["PUBLIC", "INTERNAL"])
+    permitted_access_levels: list[str] = Field(default_factory=list)
     permitted_tenants: list[str] = Field(default_factory=list)
     denied_reason: str | None = None
 
@@ -33,10 +32,17 @@ class OPAClient:
         self,
         opa_url: str = "http://localhost:8181",
         auth_token: str = "",
+        enabled: bool = True,
     ) -> None:
         self._opa_url = opa_url.rstrip("/")
+        self.enabled = enabled
         headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
         self._http = httpx.AsyncClient(timeout=5.0, headers=headers)
+        if not enabled:
+            logger.warning(
+                "opa.disabled_public_only",
+                message="OPA is disabled; only authenticated PUBLIC retrieval in authorized tenant/knowledge-base scopes is allowed.",
+            )
 
     async def evaluate_retrieval_policy(
         self,
@@ -49,6 +55,38 @@ class OPAClient:
         A missing, unreachable, malformed, or non-successful policy response denies
         retrieval. Claims never substitute for a failed policy decision.
         """
+        if not self.enabled:
+            claims = ctx.claims
+            allowed_tenants = claims.get("allowed_tenants")
+            tenant_is_allowed = (
+                claims.get("bound_tenant_id") == ctx.tenant_id
+                or (
+                    isinstance(allowed_tenants, list)
+                    and ("*" in allowed_tenants or ctx.tenant_id in allowed_tenants)
+                )
+            )
+            allowed_knowledge_bases = claims.get("allowed_knowledge_bases")
+            knowledge_base_is_allowed = (
+                isinstance(allowed_knowledge_bases, list)
+                and ctx.knowledge_base_id in allowed_knowledge_bases
+            )
+            if (
+                action != "read"
+                or claims.get("is_authenticated") is not True
+                or not ctx.tenant_id
+                or not tenant_is_allowed
+                or not knowledge_base_is_allowed
+            ):
+                return PolicyDecision(
+                    allowed=False,
+                    denied_reason="opa_disabled_protected_operation",
+                )
+            return PolicyDecision(
+                allowed=True,
+                permitted_access_levels=["PUBLIC"],
+                permitted_tenants=[ctx.tenant_id],
+            )
+
         payload = {
             "input": {
                 "tenant_id": ctx.tenant_id,

@@ -41,7 +41,7 @@ class TestLocalEmbeddingProvider:
     def test_default_query_prefix_is_false(self):
         """use_query_prefix should default to False to protect existing index compatibility."""
         provider = LocalEmbeddingProvider()
-        assert provider.use_query_prefix is False
+        assert provider._use_query_prefix is False
 
     @patch("app.services.embeddings.local_provider._get_model")
     def test_embed_query_without_prefix(self, mock_get_model):
@@ -72,14 +72,13 @@ class TestLocalEmbeddingProvider:
         expected_text = f"{_BGE_QUERY_INSTRUCTION}What is the operating pressure?"
         assert call_args == [expected_text]
 
-    def test_check_input_length_warning(self, caplog):
+    @patch("app.services.embeddings.local_provider.logger.warning")
+    def test_check_input_length_warning(self, mock_warning):
         """Inputs exceeding 350 words should trigger a warning log."""
         long_text = "word " * 360
-        with caplog.at_level("WARNING"):
-            _check_input_length([long_text], context="test_context")
-
-        assert any("local_embedder.input_too_long" in record.message or "input_too_long" in str(record.__dict__)
-                   for record in caplog.records) or len(caplog.records) >= 1
+        _check_input_length([long_text], context="test_context")
+        mock_warning.assert_called_once()
+        assert mock_warning.call_args.args[0] == "local_embedder.input_too_long"
 
     @patch("app.services.embeddings.local_provider._get_model")
     def test_embed_batch_handles_empty_list(self, mock_get_model):
@@ -105,7 +104,7 @@ class TestLocalEmbeddingProvider:
 
     @patch("app.services.embeddings.local_provider._get_model")
     def test_health_check_returns_prefix_status(self, mock_get_model):
-        """Health check returns status healthy and reports use_query_prefix."""
+        """Health check returns status and prefix metadata."""
         mock_model = MagicMock()
         mock_model.encode.return_value = np.zeros((1, 384), dtype=np.float32)
         mock_model.get_sentence_embedding_dimension.return_value = 384
@@ -113,9 +112,9 @@ class TestLocalEmbeddingProvider:
 
         provider = LocalEmbeddingProvider(use_query_prefix=True)
         health = provider.health_check()
-        assert health["status"] == "healthy"
+        assert health["status"] == "ok"
         assert health["use_query_prefix"] is True
-        assert health["embedding_dimension"] == 384
+        assert health["dimension"] == 384
 
 
 # ==============================================================================
@@ -134,7 +133,8 @@ class TestRRFRerankerService:
             metadata={"category": "manual"},
         )
 
-    def test_reranker_disabled_by_env_var(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_reranker_disabled_by_env_var(self, monkeypatch):
         """When RERANKER_ENABLED=false, rerank() returns candidates in original order."""
         monkeypatch.setenv("RERANKER_ENABLED", "false")
         assert _is_reranker_enabled() is False
@@ -144,12 +144,13 @@ class TestRRFRerankerService:
             self._make_candidate("c1", 0.5),
             self._make_candidate("c2", 0.9),
         ]
-        result = reranker.rerank(candidates, query="hydraulic pump", top_k=2)
+        result = await reranker.rerank("hydraulic pump", candidates, top_n=2)
         assert len(result) == 2
         assert [r.chunk_id for r in result] == ["c2", "c1"]  # sorted by incoming score
 
     @patch("app.services.retrieval.reranking._get_reranker", return_value=None)
-    def test_reranker_passthrough_when_cross_encoder_missing(self, mock_get, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_reranker_passthrough_when_cross_encoder_missing(self, mock_get, monkeypatch):
         """When CrossEncoder model is None, rerank falls back to score sort."""
         monkeypatch.setenv("RERANKER_ENABLED", "true")
         reranker = RRFRerankerService()
@@ -158,12 +159,13 @@ class TestRRFRerankerService:
             self._make_candidate("c2", 0.8),
             self._make_candidate("c3", 0.6),
         ]
-        result = reranker.rerank(candidates, query="test query", top_k=2)
+        result = await reranker.rerank("test query", candidates, top_n=2)
         assert len(result) == 2
         assert [r.chunk_id for r in result] == ["c2", "c3"]
 
     @patch("app.services.retrieval.reranking._get_reranker")
-    def test_reranker_scores_and_sorts_correctly(self, mock_get, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_reranker_scores_and_sorts_correctly(self, mock_get, monkeypatch):
         """When CrossEncoder is available, candidates are re-ordered by cross-encoder score."""
         monkeypatch.setenv("RERANKER_ENABLED", "true")
 
@@ -179,7 +181,7 @@ class TestRRFRerankerService:
             self._make_candidate("c1", 0.9, content="Irrelevant high-BM25 chunk"),
             self._make_candidate("c2", 0.4, content="Highly relevant exact match"),
         ]
-        result = reranker.rerank(candidates, query="hydraulic pump pressure", top_k=2)
+        result = await reranker.rerank("hydraulic pump pressure", candidates, top_n=2)
 
         assert len(result) == 2
         assert result[0].chunk_id == "c2"
@@ -188,7 +190,8 @@ class TestRRFRerankerService:
         assert result[1].score == pytest.approx(0.1, 0.01)
 
     @patch("app.services.retrieval.reranking._get_reranker")
-    def test_reranker_preserves_metadata(self, mock_get, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_reranker_preserves_metadata(self, mock_get, monkeypatch):
         """Reranking must preserve document_id, metadata, and chunk_id."""
         monkeypatch.setenv("RERANKER_ENABLED", "true")
         mock_ce = MagicMock()
@@ -203,19 +206,25 @@ class TestRRFRerankerService:
             score=0.2,
             metadata={"section": "4.1", "page": 12},
         )
-        result = reranker.rerank([candidate], query="sample", top_k=1)
+        result = await reranker.rerank("sample", [candidate], top_n=1)
         assert len(result) == 1
         assert result[0].chunk_id == "chunk-abc"
         assert result[0].document_id == "doc-xyz"
-        assert result[0].metadata == {"section": "4.1", "page": 12}
+        assert result[0].metadata == {
+            "section": "4.1",
+            "page": 12,
+            "_rerank_requirement_scores": {"sample": pytest.approx(0.95, 0.01)},
+        }
 
-    def test_reranker_handles_empty_candidates(self):
+    @pytest.mark.asyncio
+    async def test_reranker_handles_empty_candidates(self):
         """Reranker on empty candidates list returns empty list."""
         reranker = RRFRerankerService()
-        assert reranker.rerank([], query="any query") == []
+        assert await reranker.rerank("any query", []) == []
 
     @patch("app.services.retrieval.reranking._get_reranker")
-    def test_reranker_handles_single_candidate(self, mock_get, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_reranker_handles_single_candidate(self, mock_get, monkeypatch):
         """Single candidate list is processed cleanly."""
         monkeypatch.setenv("RERANKER_ENABLED", "true")
         mock_ce = MagicMock()
@@ -224,7 +233,7 @@ class TestRRFRerankerService:
 
         reranker = RRFRerankerService()
         candidates = [self._make_candidate("c1", 0.5)]
-        result = reranker.rerank(candidates, query="test", top_k=1)
+        result = await reranker.rerank("test", candidates, top_n=1)
         assert len(result) == 1
         assert result[0].score == pytest.approx(0.77, 0.01)
 

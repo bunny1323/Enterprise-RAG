@@ -23,15 +23,29 @@ def make_security_cache_key(
     kb_version: int,
     query: str,
     prefix: str = "query_res",
+    permitted_access_levels: list[str] | None = None,
 ) -> str:
     """
     Build a security-isolated cache key.
     Includes tenant, kb_version, access_level, and query hash.
     """
     query_hash = hashlib.sha256(query.lower().strip().encode("utf-8")).hexdigest()[:16]
+    policy_scope = json.dumps(
+        {
+            "user_id": ctx.user_id,
+            "claims": ctx.claims,
+            "permitted_access_levels": sorted(
+                set(permitted_access_levels or [ctx.access_level])
+            ),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    scope_hash = hashlib.sha256(policy_scope.encode("utf-8")).hexdigest()[:16]
     raw = (
         f"{prefix}::{ctx.tenant_id}::{ctx.assistant_id}::{ctx.knowledge_base_id}::"
-        f"v{kb_version}::{ctx.access_level}::{query_hash}"
+        f"v{kb_version}::{ctx.access_level}::{scope_hash}::{query_hash}"
     )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -57,10 +71,21 @@ class CacheService:
         )
         return row["version"] if row else 1
 
-    async def get_response(self, ctx: TenantContext, query: str) -> dict | None:
+    async def get_response(
+        self,
+        ctx: TenantContext,
+        query: str,
+        permitted_access_levels: list[str] | None = None,
+    ) -> dict | None:
         """Get cached response if present for this exact security context."""
         kb_ver = await self.get_kb_version(ctx.tenant_id, ctx.knowledge_base_id)
-        cache_key = make_security_cache_key(ctx, kb_ver, query, prefix="rag_resp")
+        cache_key = make_security_cache_key(
+            ctx,
+            kb_ver,
+            query,
+            prefix="rag_resp",
+            permitted_access_levels=permitted_access_levels,
+        )
 
         cached_str = await self._redis.get(cache_key)
         if cached_str:
@@ -74,11 +99,22 @@ class CacheService:
         return None
 
     async def set_response(
-        self, ctx: TenantContext, query: str, response_data: dict, ttl_seconds: int = 3600
+        self,
+        ctx: TenantContext,
+        query: str,
+        response_data: dict,
+        ttl_seconds: int = 3600,
+        permitted_access_levels: list[str] | None = None,
     ) -> None:
         """Cache response under this exact security context."""
         kb_ver = await self.get_kb_version(ctx.tenant_id, ctx.knowledge_base_id)
-        cache_key = make_security_cache_key(ctx, kb_ver, query, prefix="rag_resp")
+        cache_key = make_security_cache_key(
+            ctx,
+            kb_ver,
+            query,
+            prefix="rag_resp",
+            permitted_access_levels=permitted_access_levels,
+        )
 
         await self._redis.set(cache_key, json.dumps(response_data), ttl_seconds=ttl_seconds)
         logger.info("rag_cache.stored", tenant=ctx.tenant_id, ttl=ttl_seconds)

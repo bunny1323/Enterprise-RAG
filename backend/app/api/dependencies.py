@@ -65,7 +65,11 @@ def get_redis(request: Request) -> RedisClient | None:
 
 def get_opa(request: Request) -> OPAClient:
     """Return the shared OPAClient from application state."""
-    return getattr(request.app.state, "opa", OPAClient())
+    client = getattr(request.app.state, "opa", None)
+    if client is not None:
+        return client
+    settings = getattr(request.app.state, "settings", None)
+    return OPAClient(enabled=getattr(settings, "opa_enabled", True))
 
 
 def get_supervisor(request: Request):  # type: ignore[return]
@@ -120,6 +124,7 @@ def get_tenant_context(
     is_admin = False
     bound_tenant_id = settings.default_tenant_id
     allowed_tenants: list[str] = []
+    allowed_knowledge_bases: list[str] = ["default"]
     user_id = request.headers.get("X-User-ID", None)
 
     # 1. Parse server-side token mapping if configured
@@ -144,6 +149,12 @@ def get_tenant_context(
             is_admin = bool(info.get("is_admin", False) or "admin" in info.get("roles", []))
             bound_tenant_id = str(info.get("tenant_id", settings.default_tenant_id))
             allowed_tenants = list(info.get("allowed_tenants", [bound_tenant_id]))
+            configured_knowledge_bases = info.get("allowed_knowledge_bases", ["default"])
+            allowed_knowledge_bases = (
+                [kb for kb in configured_knowledge_bases if isinstance(kb, str) and kb]
+                if isinstance(configured_knowledge_bases, list)
+                else []
+            )
             user_id = info.get("user_id", user_id)
         # Check Standard API Auth Token
         elif settings.api_auth_token and secrets.compare_digest(token, settings.api_auth_token):
@@ -230,6 +241,7 @@ def get_tenant_context(
         "is_admin": is_admin,
         "token_present": bool(token),
         "allowed_tenants": allowed_tenants,
+        "allowed_knowledge_bases": allowed_knowledge_bases,
         "bound_tenant_id": bound_tenant_id,
     }
 

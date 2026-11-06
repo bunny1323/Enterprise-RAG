@@ -38,6 +38,7 @@ from app.api.routes.jobs import cancel_job, get_job_status
 from app.config.settings import Settings
 from app.models.tenant import TenantContext
 from app.services.cache.semantic import _semantic_cache_namespace
+from app.services.cache.service import make_security_cache_key
 from app.services.generation.prompts import PromptRegistry
 from app.services.pii.interface import SimpleRegexPIIDetector
 
@@ -91,7 +92,9 @@ def test_02_invalid_credentials_rejected():
 
 def test_03_production_config_rejects_disabled_authentication():
     """Startup config validation must fail if APP_ENV is production and auth is disabled."""
-    settings = Settings(
+    with pytest.raises(ValueError) as exc:
+        Settings(
+        _env_file=None,
         app_env="production",
         api_key_auth_enabled=False,
         database_url="postgresql://user:pass@localhost:5432/db",
@@ -99,9 +102,6 @@ def test_03_production_config_rejects_disabled_authentication():
         weaviate_api_key="real-weaviate-key",
         neo4j_password="real-neo4j-password",
     )
-    with pytest.raises(ValueError) as exc:
-        settings.validate_startup_config()
-
     assert "API_KEY_AUTH_ENABLED must be set to 'true'" in str(exc.value)
 
 
@@ -360,6 +360,29 @@ def test_13_semantic_cache_isolates_tenants():
     assert len(ns_a) == 24
 
 
+def test_response_cache_isolates_users_and_policy_access_scope():
+    ctx_a = TenantContext(
+        tenant_id="tenant_a",
+        assistant_id="assistant",
+        knowledge_base_id="kb",
+        user_id="user_a",
+        claims={"roles": ["reader"]},
+    )
+    ctx_b = ctx_a.model_copy(update={"user_id": "user_b"})
+    key_a = make_security_cache_key(
+        ctx_a, 1, "same query", permitted_access_levels=["PUBLIC"]
+    )
+    key_b = make_security_cache_key(
+        ctx_b, 1, "same query", permitted_access_levels=["PUBLIC"]
+    )
+    key_restricted = make_security_cache_key(
+        ctx_a, 1, "same query", permitted_access_levels=["PUBLIC", "RESTRICTED"]
+    )
+
+    assert key_a != key_b
+    assert key_a != key_restricted
+
+
 @pytest.mark.asyncio
 async def test_14_background_jobs_isolated_by_tenant():
     """cancel_job fails with HTTP 404 when job belongs to another tenant."""
@@ -373,6 +396,33 @@ async def test_14_background_jobs_isolated_by_tenant():
         await cancel_job(job_id=job_uuid, postgres=postgres, tenant_ctx=tenant_a_ctx)
 
     assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_completed_job_cannot_be_cancelled():
+    postgres = MagicMock()
+    postgres.fetchrow = AsyncMock(
+        side_effect=[
+            {
+                "job_id": uuid.uuid4(),
+                "document_id": uuid.uuid4(),
+                "status": "COMPLETED",
+            },
+            None,
+        ]
+    )
+    tenant_ctx = TenantContext(tenant_id="tenant_a", knowledge_base_id="kb1")
+
+    with pytest.raises(HTTPException) as exc:
+        await cancel_job(
+            job_id=str(uuid.uuid4()),
+            postgres=postgres,
+            tenant_ctx=tenant_ctx,
+        )
+
+    assert exc.value.status_code == 409
+    assert postgres.fetchrow.await_count == 2
+    postgres.execute.assert_not_called()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

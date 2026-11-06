@@ -8,6 +8,11 @@ export default function Settings() {
   const { health, loading, checkHealth } = useHealth(false);
   const [token, setToken] = useState("");
   const [savedSuccess, setSavedSuccess] = useState(false);
+  const docsUrl = API_BASE_URL
+    ? `${API_BASE_URL}/docs`
+    : import.meta.env.DEV
+      ? "http://localhost:8000/docs"
+      : null;
 
   useEffect(() => {
     const existing = sessionStorage.getItem("erag_token") || "";
@@ -40,7 +45,7 @@ export default function Settings() {
           <div className="flex items-center justify-between text-sm">
             <span className="text-ink-soft">Backend URL</span>
             <span className="font-mono text-ink">
-              {API_BASE_URL || (import.meta.env.DEV ? "http://localhost:8001 (Vite Proxy)" : "Not configured")}
+              {API_BASE_URL || (import.meta.env.DEV ? "http://localhost:8000 (Vite Proxy)" : "Not configured")}
             </span>
           </div>
           <div className="mt-4 flex items-center justify-between rounded-md border border-line bg-surface-sunk px-3 py-2.5">
@@ -103,9 +108,15 @@ export default function Settings() {
         {/* Developer Links */}
         <div className="rounded-lg border border-line bg-surface px-5 py-4">
           <p className="text-sm font-medium text-ink mb-2">Developer links</p>
-          <a href={`${API_BASE_URL || "http://localhost:8001"}/docs`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 text-sm text-signal-dark hover:underline">
-            Open FastAPI documentation <ExternalLink className="h-3.5 w-3.5" />
-          </a>
+          {docsUrl ? (
+            <a href={docsUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 text-sm text-signal-dark hover:underline">
+              Open FastAPI documentation <ExternalLink className="h-3.5 w-3.5" />
+            </a>
+          ) : (
+            <p className="text-sm text-ink-soft">
+              Configure <code className="font-mono">VITE_API_BASE_URL</code> to open the API documentation.
+            </p>
+          )}
         </div>
       </div>
     </AppLayout>

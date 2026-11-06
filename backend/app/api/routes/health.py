@@ -89,7 +89,9 @@ async def health_check(request: Request) -> dict:
     # ── OPA Policy Service ─────────────────────────────────────────────────────
     try:
         opa_client = request.app.state.opa
-        if await opa_client.health_check():
+        if not opa_client.enabled:
+            services["opa"] = "disabled (PUBLIC-only retrieval; protected image access denied)"
+        elif await opa_client.health_check():
             services["opa"] = "ok"
         else:
             services["opa"] = "error: policy service unavailable"
@@ -161,8 +163,10 @@ async def health_check(request: Request) -> dict:
     else:
         services["redis"] = "disabled"
 
+    opa_disabled = not getattr(getattr(request.app.state, "opa", None), "enabled", True)
     return {
-        "status": "healthy" if overall_healthy else "degraded",
+        "status": "degraded" if not overall_healthy else "limited" if opa_disabled else "healthy",
+        "security_mode": "OPA_DISABLED_PUBLIC_ONLY" if opa_disabled else "OPA_ENFORCED",
         "services": services,
     }
 
@@ -172,7 +176,11 @@ async def health_check(request: Request) -> dict:
 async def readiness_check(request: Request) -> JSONResponse:
     """Return 503 when a required runtime dependency cannot be used."""
     payload = await health_check(request)
-    code = status.HTTP_200_OK if payload["status"] == "healthy" else status.HTTP_503_SERVICE_UNAVAILABLE
+    code = (
+        status.HTTP_200_OK
+        if payload["status"] in {"healthy", "limited"}
+        else status.HTTP_503_SERVICE_UNAVAILABLE
+    )
     return JSONResponse(status_code=code, content=payload)
 
 
@@ -217,4 +225,3 @@ async def test_llm(request: Request) -> dict:
     except Exception as err:
         logger.error("health.llm_test_failed", error=str(err))
         return {"status": "error", "error": str(err)}
-

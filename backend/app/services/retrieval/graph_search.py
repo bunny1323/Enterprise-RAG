@@ -26,11 +26,14 @@ class GraphSearchService:
         tenant_id: str = "default",
         knowledge_base_id: str = "default",
         max_hops: int = 2,
+        permitted_access_levels: list[str] | None = None,
     ) -> list[SearchResult]:
         """
         Execute multi-hop graph search for entities or section names.
         """
         if not entity_name.strip():
+            return []
+        if permitted_access_levels == []:
             return []
 
         records = await self._neo4j.graph_search(
@@ -49,10 +52,19 @@ class GraphSearchService:
             """
             SELECT chunk_id, document_id, content, page_number, chunk_type, context_prefix, section
             FROM chunks
-            WHERE chunk_id = ANY($1::text[]) AND tenant_id = $2
+            WHERE chunk_id = ANY($1::text[])
+              AND tenant_id = $2
+              AND knowledge_base_id = $3
+              AND access_classification = ANY($4::text[])
             """,
             chunk_ids,
             tenant_id,
+            knowledge_base_id,
+            (
+                permitted_access_levels
+                if permitted_access_levels is not None
+                else ["PUBLIC", "INTERNAL"]
+            ),
         )
 
         results: list[SearchResult] = []

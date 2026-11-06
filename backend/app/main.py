@@ -120,6 +120,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     opa_client = OPAClient(
         opa_url=settings.opa_url,
         auth_token=settings.opa_auth_token,
+        enabled=settings.opa_enabled,
     )
     app.state.opa = opa_client
 

@@ -1,19 +1,26 @@
-# Enterprise-RAG — Final Production Certification Report
+# Enterprise-RAG — Historical Production Readiness Assessment
 
-**Date:** 2026-10-22  
-**Repository:** `C:\Users\vigne\Enterprise-RAG`  
-**Prepared by:** Principal Software Architect, Application Security Engineer, Senior Backend/Frontend Engineer, DevOps Lead
+> **This is not a production certification.** This report is a historical snapshot
+> whose capability counts, test inventory, and implementation claims have not
+> been revalidated against the current branch. The current code-grounded design
+> and deployment constraints are documented in
+> [`docs/architecture.md`](./docs/architecture.md) and
+> [`docs/production_runbook.md`](./docs/production_runbook.md).
 
 ---
 
 ## 1. Executive Summary
 
-The Enterprise-RAG platform has undergone six engineering passes covering the complete stack: PDF ingestion pipeline repair, full security audit and remediation, multi-tenant isolation hardening, frontend/backend integration, reliability improvements, and CI/CD setup. All locally implementable fixes have been applied and verified through static code inspection and automated unit tests (18 security tests + existing suite).
+The current branch is **not verified production-ready**. Its backend unit tests
+and frontend production build pass locally, but hosted-service connectivity,
+Render runtime behavior, OCR coverage for scanned documents, durable shared
+file storage, and the blocking Ruff CI step remain unverified or unresolved.
 
-**Status: READY FOR STAGING VERIFICATION**
+**Status: STAGING AND DEPLOYMENT VERIFICATION REQUIRED**
 
 > [!IMPORTANT]
-> Staging deployment with live external services (Supabase PostgreSQL, Weaviate Cloud, Neo4j Aura, Redis Cloud) is required before promoting to production. The items listed in Section 5 cannot be verified locally.
+> Do not use the historical `PASS_VERIFIED` tables below as current evidence.
+> A passing local build does not verify Render operation or external services.
 
 ---
 
@@ -134,8 +141,8 @@ graph LR
 | 1 | Integration test suite | DevOps | Run `pytest tests/integration/ -m integration` on a staging Render instance with real Supabase, Weaviate, Neo4j, Redis credentials |
 | 2 | End-to-end PDF ingestion | QA | Upload a PDF to the staging API and verify progression through all 9 pipeline steps |
 | 3 | Render environment variables | DevOps | Set `APP_ENV=production`, `API_KEY_AUTH_ENABLED=true`, `API_AUTH_TOKEN`, `ADMIN_API_TOKEN` in Render dashboard |
-| 4 | Vercel environment variables | DevOps | Set `VITE_API_BASE_URL=https://enterprise-rag-2u7l.onrender.com` |
-| 5 | CORS allowlist | DevOps | Add production Vercel URL to `CORS_ORIGINS` env var in Render |
+| 4 | Render static-site environment variables | DevOps | Set `VITE_API_BASE_URL` to the actual deployed backend URL |
+| 5 | CORS allowlist | DevOps | Add the actual Render static-site or custom frontend origin to `CORS_ORIGINS` |
 | 6 | Redis Cloud connectivity | DevOps | Verify `REDIS_URL` points to Redis Cloud instance; confirm semantic cache hits |
 | 7 | Secrets rotation | Security | Rotate all placeholder tokens before going live |
 | 8 | Branch protection rules | DevOps | Require `ci-gate` status check to pass before merging PRs in GitHub settings |
@@ -181,4 +188,4 @@ graph LR
 | File | Change Type | Summary |
 |------|------------|---------|
 | [`.github/workflows/ci.yml`](file:///C:/Users/vigne/Enterprise-RAG/.github/workflows/ci.yml) | Created | 5-job GitHub Actions CI/CD pipeline |
-| [`.gitignore`](file:///C:/Users/vigne/Enterprise-RAG/.gitignore) | No change | Already correctly excludes `.env`, `data/`, `*.log` |
+| [`.gitignore`](file:///C:/Users/vigne/Enterprise-RAG/.gitignore) | Modified | Excludes environment files, local data, dependencies, caches, logs, and generated API snapshots |

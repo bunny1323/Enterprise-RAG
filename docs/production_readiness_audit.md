@@ -1,29 +1,36 @@
-# Enterprise-RAG Production Readiness Audit Report
+# Historical Enterprise-RAG Production Readiness Audit
 
 **Assessment Date:** 2026-10-22  
 **Platform:** Enterprise-RAG Multimodal Retrieval-Augmented Generation  
-**Scope:** 71 Production Capabilities across 14 Architectural Phases (Phases 02 – 15)  
-**Evaluation Standard:** Enterprise Production Readiness Gate (OWASP Top 10 for LLMs, Multi-tenant Isolation, Zero Hallucination Standard)
+
+> **Historical snapshot, not a current certification.** The capability statuses,
+> counts, test references, and implementation descriptions in the tables below
+> have not been revalidated against the current branch. In particular, do not
+> treat `PASS_VERIFIED` as evidence that the feature is production-ready. See
+> [`architecture.md`](./architecture.md) for the code-grounded design and
+> [`production_runbook.md`](./production_runbook.md) for current deployment
+> requirements and blockers.
 
 ---
 
 ## Executive Summary
 
-An exhaustive engineering audit was performed across all 71 discrete capabilities of the Enterprise-RAG platform. The audit verified actual code implementations in `backend/app/`, validated corresponding unit and regression test suites in `backend/tests/`, and evaluated runtime resilience against production failure modes.
+The current local validation completed 249 backend unit tests and a frontend
+production build. No live Render deployment or hosted-service integration test
+was performed. Current limitations include a placeholder `IngestionAgent`,
+OCR not being wired as a general ingestion stage, replay from the beginning
+after a worker restart, single-instance local-file storage, and a Ruff CI
+command that still reports existing lint findings. Production readiness is
+therefore **not established**.
 
-### Capability Status Distribution
+### Historical Capability Status Distribution
 
-| Status | Count | Percentage | Definition |
-| :--- | :--- | :--- | :--- |
-| **PASS_VERIFIED** | 62 | 87.3% | Implemented in active code, verified by automated tests, resilient against failure modes. |
-| **PARTIAL** | 6 | 8.5% | Working core implementation present, but secondary edge-cases or zero-downtime automation incomplete. |
-| **STUB_OR_NOOP** | 0 | 0.0% | Stubs eliminated; previously inactive hooks (e.g., PII detection) wired into live pipelines. |
-| **MISSING** | 3 | 4.2% | Non-critical enhancements absent (Explicit Circuit Breaker state machine, In-database A/B traffic router, Dynamic OPA rules engine). |
-| **BROKEN** | 0 | 0.0% | Zero broken components. Storage path and ephemeral container resolution bugs successfully remediated. |
+The distribution below is retained only as historical context. It is not a
+current evaluation and should not be used for deployment or merge approval.
 
 ---
 
-## Detailed Capability Audit by Phase
+## Historical Detailed Capability Audit by Phase
 
 ### Phase 02: Document Processing
 

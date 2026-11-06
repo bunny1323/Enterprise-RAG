@@ -60,6 +60,7 @@ class Settings(BaseSettings):
         default="",
         validation_alias=AliasChoices("API_TOKENS_MAPPING", "API_TOKENS_JSON"),
     )
+    opa_enabled: bool = Field(default=True, validation_alias=AliasChoices("OPA_ENABLED"))
     opa_url: str = Field(default="http://localhost:8181")
     opa_auth_token: str = Field(default="")
     default_tenant_id: str = Field(
@@ -267,18 +268,20 @@ class Settings(BaseSettings):
                     f"Production configuration error: API_KEY_AUTH_ENABLED must be set to 'true' "
                     f"in production mode (APP_ENV={self.app_env!r})."
                 )
-            from urllib.parse import urlparse
+            if self.opa_enabled:
+                from urllib.parse import urlparse
 
-            parsed_opa_url = urlparse(self.opa_url)
-            opa_host = parsed_opa_url.hostname
-            if (
-                parsed_opa_url.scheme != "https"
-                or not opa_host
-                or opa_host in {"localhost", "127.0.0.1", "::1"}
-            ):
-                raise ValueError(
-                    "Production configuration error: OPA_URL must be an HTTPS hosted policy service."
-                )
+                parsed_opa_url = urlparse(self.opa_url)
+                opa_host = parsed_opa_url.hostname
+                if (
+                    parsed_opa_url.scheme != "https"
+                    or not opa_host
+                    or opa_host in {"localhost", "127.0.0.1", "::1"}
+                ):
+                    raise ValueError(
+                        "Production configuration error: OPA_URL must be an HTTPS hosted policy service "
+                        "when OPA_ENABLED=true."
+                    )
             if not self.api_auth_token and not self.admin_api_token and not self.api_tokens_json:
                 raise ValueError(
                     "Production configuration error: API_AUTH_TOKEN, ADMIN_API_TOKEN, or API_TOKENS_MAPPING "
@@ -288,6 +291,12 @@ class Settings(BaseSettings):
                 raise ValueError("Production configuration error: API_AUTH_TOKEN contains placeholder text.")
             if self.admin_api_token and _has_placeholder(self.admin_api_token):
                 raise ValueError("Production configuration error: ADMIN_API_TOKEN contains placeholder text.")
+
+        if not self.opa_enabled and not self.api_key_auth_enabled:
+            raise ValueError(
+                "OPA_ENABLED=false requires API_KEY_AUTH_ENABLED=true; "
+                "unauthenticated requests cannot use the reduced-security mode."
+            )
 
         # ── 1. Placeholder detection ──────────────────────────────────────────
 

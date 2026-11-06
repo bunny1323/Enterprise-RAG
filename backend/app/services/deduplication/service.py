@@ -46,22 +46,32 @@ class DeduplicationService:
     # ── Level 1: File Hash (SHA-256) ──────────────────────────────────────────
 
     async def check_file_hash(
-        self, sha256: str, tenant_id: str, current_doc_id: UUID, postgres: PostgresClient
+        self,
+        sha256: str,
+        tenant_id: str,
+        knowledge_base_id: str,
+        current_doc_id: UUID,
+        postgres: PostgresClient,
     ) -> dict | None:
-        """Query PostgreSQL for an existing completed document with the same SHA-256 and verified chunks."""
+        """Find a completed exact duplicate within the same tenant and knowledge base."""
         row = await postgres.fetchrow(
             """
             SELECT d.id, d.sha256, d.file_name, d.version, d.content_hash,
                    COUNT(c.chunk_id) AS chunk_count
             FROM documents d
             LEFT JOIN chunks c ON c.document_id = d.id
-            WHERE d.sha256 = $1 AND d.tenant_id = $2 AND d.id != $3 AND d.status = 'COMPLETED'
+            WHERE d.sha256 = $1
+              AND d.tenant_id = $2
+              AND d.knowledge_base_id = $3
+              AND d.id != $4
+              AND d.status = 'COMPLETED'
             GROUP BY d.id
             ORDER BY d.created_at DESC
             LIMIT 1
             """,
             sha256,
             tenant_id,
+            knowledge_base_id,
             current_doc_id,
         )
         if row and row.get("chunk_count", 0) > 0:

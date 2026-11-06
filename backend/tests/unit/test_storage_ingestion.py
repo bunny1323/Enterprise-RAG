@@ -12,6 +12,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import importlib
 import io
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -23,9 +24,9 @@ from app.agents.supervisor.agent import IngestionSupervisor
 from app.agents.supervisor.state import IngestionState
 from app.infrastructure.storage.client import StorageClient
 from app.models.document import DocumentStatus
-from app.pipelines.ingestion.steps import s01_validate
 from app.services.storage.service import StorageService
 
+s01_validate = importlib.import_module("app.pipelines.ingestion.steps.s01_validate")
 
 # Minimal valid PDF header bytes
 _VALID_PDF_BYTES = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF"
@@ -121,10 +122,10 @@ class TestIngestionSupervisor:
         storage_svc = StorageService(client)
 
         mock_postgres = AsyncMock()
-        mock_postgres.fetchrow.side_effect = [
-            {"id": uuid4()},       # doc row
-            {"job_id": uuid4()},   # job row
-        ]
+        mock_postgres.register_ingestion.return_value = {
+            "document_id": uuid4(),
+            "job_id": uuid4(),
+        }
         mock_pipeline = MagicMock()
 
         supervisor = IngestionSupervisor(
@@ -142,11 +143,10 @@ class TestIngestionSupervisor:
         assert "document_id" in res
         assert "job_id" in res
         assert res["status"] == "RECEIVED"
-        assert supervisor._queue.qsize() == 1
-
-        queued_state = await supervisor._queue.get()
-        assert Path(queued_state.storage_path).is_file()
-        assert queued_state.filename == "schematic.pdf"
+        mock_postgres.register_ingestion.assert_awaited_once()
+        registration = mock_postgres.register_ingestion.call_args.kwargs
+        assert Path(registration["storage_path"]).is_file()
+        assert registration["file_name"] == "schematic.pdf"
 
     @pytest.mark.asyncio
     async def test_handle_upload_rejects_empty_file(self, tmp_path: Path):
@@ -173,8 +173,7 @@ class TestIngestionSupervisor:
         with pytest.raises(ValueError, match="empty \\(0 bytes\\)"):
             await supervisor.handle_upload(mock_file)
 
-        assert supervisor._queue.qsize() == 0
-        mock_postgres.fetchrow.assert_not_called()
+        mock_postgres.register_ingestion.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_recovery_marks_missing_ephemeral_file_failed(self, tmp_path: Path):
@@ -189,17 +188,8 @@ class TestIngestionSupervisor:
         missing_doc_id = uuid4()
         mock_postgres = AsyncMock()
         # Return one pending doc whose file does not exist on this container
-        mock_postgres.fetch.return_value = [
-            {
-                "id": missing_doc_id,
-                "file_name": "wiped_file.pdf",
-                "storage_path": "/opt/render/project/src/backend/data/raw/wiped_file.pdf",
-                "industry": "manufacturing",
-                "tenant_id": "tenant-1",
-                "assistant_id": "asst-1",
-                "knowledge_base_id": "kb-1",
-            }
-        ]
+        missing_path = tmp_path / "wiped_file.pdf"
+        storage_svc.get_raw_path = MagicMock(return_value=missing_path)
 
         mock_pipeline = MagicMock()
         supervisor = IngestionSupervisor(
@@ -208,18 +198,23 @@ class TestIngestionSupervisor:
             postgres=mock_postgres,
         )
 
-        # Trigger process_queue recovery logic with task cancellation
-        worker_task = asyncio.create_task(supervisor.process_queue())
-        await asyncio.sleep(0.05)
-        worker_task.cancel()
-
-        # The missing document must NOT be put in queue
-        assert supervisor._queue.qsize() == 0
-
-        # It must have executed an UPDATE setting status = 'FAILED'
-        execute_calls = mock_postgres.execute.call_args_list
-        assert len(execute_calls) >= 2
-        assert any("FAILED" in str(call) for call in execute_calls)
+        job_id = uuid4()
+        await supervisor._process_claimed_job(
+            {
+                "job_id": job_id,
+                "document_id": missing_doc_id,
+                "storage_path": str(missing_path),
+                "file_name": "wiped_file.pdf",
+                "industry": "manufacturing",
+                "tenant_id": "tenant-1",
+                "assistant_id": "asst-1",
+                "knowledge_base_id": "kb-1",
+            },
+            lease_seconds=30,
+            heartbeat_seconds=10,
+        )
+        mock_postgres.record_ingestion_failure.assert_awaited_once()
+        assert mock_postgres.record_ingestion_failure.call_args.kwargs["force_fail"] is True
 
 
 # ==============================================================================
