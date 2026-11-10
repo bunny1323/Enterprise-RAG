@@ -21,6 +21,7 @@ class QueryWorkflowState(TypedDict):
     intent: str
     intent_confidence: float
     permitted_access_levels: list[str]
+    policy_authorized: NotRequired[bool]
     cache_hit: bool
     retrieval_strategy: str
     
@@ -48,6 +49,7 @@ class QueryWorkflowState(TypedDict):
     evidence_coverage: str
     answerable: bool
     retrieval_trace: dict[str, Any]
+    retrieval_diagnostics: NotRequired[dict[str, Any]]
 
     # Metadata
     trace_id: str

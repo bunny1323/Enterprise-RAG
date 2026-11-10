@@ -183,6 +183,9 @@ class OPAClient:
 
     async def health_check(self) -> bool:
         """Check that the configured policy service is reachable."""
+        if not self.enabled:
+            return False
+
         try:
             response = await self._http.get(f"{self._opa_url}/health")
         except httpx.HTTPError as err:

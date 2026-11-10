@@ -79,6 +79,10 @@ class QueryNodes:
         with tracer.start_as_current_span("QueryNodes.evaluate_policy") as span:
             ctx = state["tenant_context"]
             span.set_attribute("tenant_id", ctx.tenant_id)
+            if state.get("policy_authorized") and state.get("permitted_access_levels"):
+                span.set_attribute("policy_pre_authorized", True)
+                return state
+
             decision = await self._opa.evaluate_retrieval_policy(ctx)
             
             if not decision.allowed:
@@ -111,7 +115,7 @@ class QueryNodes:
                 logger.exception("query_cache.lookup_failed", error=str(err))
                 state["cache_hit"] = False
                 return state
-            
+
             if cached:
                 span.set_attribute("cache_hit", True)
                 state["cache_hit"] = True
@@ -122,6 +126,14 @@ class QueryNodes:
                 state["confidence_score"] = cached.get("confidence_score", 1.0)
                 state["verification_status"] = cached.get("verification_status", "SUPPORTED")
                 state["retrieval_strategy"] = cached.get("retrieval_strategy", "exact_cache")
+                # Classify intent so the response always carries a meaningful intent label,
+                # even when the full retrieve_evidence node is bypassed by a cache hit.
+                if not state.get("intent"):
+                    norm = self._normalizer.normalize(
+                        state.get("original_query") or state["query"]
+                    )
+                    state["intent"] = norm.intent
+                    state["intent_confidence"] = norm.intent_confidence
                 return state
 
             # 2. Check semantic cache
@@ -153,6 +165,14 @@ class QueryNodes:
                             state["confidence_score"] = sem_cached.get("confidence_score", 1.0)
                             state["verification_status"] = sem_cached.get("verification_status", "SUPPORTED")
                             state["retrieval_strategy"] = sem_cached.get("retrieval_strategy", "semantic_cache")
+                            # Classify intent so the response always carries a meaningful intent label,
+                            # even when retrieve_evidence is bypassed by a semantic cache hit.
+                            if not state.get("intent"):
+                                norm = self._normalizer.normalize(
+                                    state.get("original_query") or state["query"]
+                                )
+                                state["intent"] = norm.intent
+                                state["intent_confidence"] = norm.intent_confidence
                             return state
                 except Exception as err:
                     logger.exception("query_cache.semantic_lookup_failed", error=str(err))
@@ -178,7 +198,8 @@ class QueryNodes:
             qstate = QueryState(
                 query=retrieval_query,
                 tenant_context=state["tenant_context"],
-                top_k=state["top_k"]
+                top_k=state["top_k"],
+                trace_id=state.get("trace_id", ""),
             )
 
             result = await self._retrieval_agent.retrieve(
@@ -196,6 +217,7 @@ class QueryNodes:
             state["confidence_level"] = result.confidence_level
             state["confidence_score"] = result.confidence_score
             state["retrieval_strategy"] = result.strategy_used
+            state["retrieval_diagnostics"] = result.retrieval_diagnostics
             state["normalized_query"] = getattr(
                 result, "normalized_query", ""
             ) or self._normalizer.normalize(retrieval_query).clean_query

@@ -4,8 +4,8 @@ Manages connection, schema initialization, vector upsert, and tenant-isolated se
 Uses weaviate-client v4 API.
 """
 import json
-from uuid import NAMESPACE_URL, UUID, uuid5
 from typing import Any
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 import weaviate
 import weaviate.classes as wvc
@@ -17,6 +17,18 @@ from app.models.chunk import Chunk
 logger = get_logger(__name__)
 
 _COLLECTION_NAME = "DocumentChunk"
+
+
+def _access_classification_filter(levels: list[str]) -> Any:
+    """Build exact-match filters for the scalar classification property."""
+    filters = [
+        wvc.query.Filter.by_property("access_classification").equal(level)
+        for level in levels
+    ]
+    combined = filters[0]
+    for level_filter in filters[1:]:
+        combined = combined | level_filter
+    return combined
 
 
 def _chunk_object_uuid(chunk_id: str) -> UUID:
@@ -77,6 +89,9 @@ class WeaviateClient:
             name=_COLLECTION_NAME,
             description="Hierarchical document chunks with BAAI/bge-small-en-v1.5 embeddings",
             vectorizer_config=wvc.config.Configure.Vectorizer.none(),  # BYO vectors
+            vector_index_config=wvc.config.Configure.VectorIndex.hnsw(
+                distance_metric=wvc.config.VectorDistances.COSINE,
+            ),
             properties=[
                 wvc.config.Property(
                     name="chunk_id",
@@ -218,7 +233,6 @@ class WeaviateClient:
         client = self._require_client()
         if not client.collections.exists(_COLLECTION_NAME):
             return None
-        
         collection = client.collections.get(_COLLECTION_NAME)
         # Fetch 1 object with its vector
         response = collection.query.fetch_objects(limit=1, include_vector=True)
@@ -232,6 +246,19 @@ class WeaviateClient:
             elif isinstance(vec, list):
                 return len(vec)
         return None
+
+    def get_collection_distance_metric(self) -> str | None:
+        """Return the configured vector distance metric without reading document content."""
+        client = self._require_client()
+        if not client.collections.exists(_COLLECTION_NAME):
+            return None
+        collection = client.collections.get(_COLLECTION_NAME)
+        config = collection.config.get()
+        vector_config = config.vector_index_config
+        distance_metric = getattr(vector_config, "distance_metric", None)
+        if distance_metric is None:
+            return None
+        return str(getattr(distance_metric, "value", distance_metric))
 
     def get_object_count(self) -> int:
         """Return total object count in the collection."""
@@ -310,6 +337,87 @@ class WeaviateClient:
         collection.data.delete_many(where=flt)
         logger.info("weaviate.chunks_deleted", document_id=document_id, tenant_id=tenant_id)
 
+    def update_document_access_classification(
+        self,
+        document_id: str,
+        tenant_id: str,
+        knowledge_base_id: str,
+        access_classification: str,
+        expected_chunk_count: int,
+    ) -> dict[str, str]:
+        """Update a document's indexed chunks and return their prior classifications."""
+        client = self._require_client()
+        collection = client.collections.get(_COLLECTION_NAME)
+        filters = (
+            wvc.query.Filter.by_property("document_id").equal(str(document_id))
+            & wvc.query.Filter.by_property("tenant_id").equal(tenant_id)
+            & wvc.query.Filter.by_property("knowledge_base_id").equal(knowledge_base_id)
+        )
+
+        objects = []
+        after = None
+        while True:
+            page = collection.query.fetch_objects(
+                filters=filters,
+                limit=1000,
+                after=after,
+                return_properties=["access_classification"],
+            )
+            if not page.objects:
+                break
+            objects.extend(page.objects)
+            after = page.objects[-1].uuid
+
+        if len(objects) != expected_chunk_count:
+            raise RuntimeError(
+                "PostgreSQL and Weaviate chunk counts differ; classification update was not applied."
+            )
+        previous = {
+            str(obj.uuid): str(obj.properties.get("access_classification") or "")
+            for obj in objects
+        }
+
+        updated_ids: list[str] = []
+        try:
+            for object_id in previous:
+                collection.data.update(
+                    uuid=UUID(object_id),
+                    properties={"access_classification": access_classification},
+                )
+                updated_ids.append(object_id)
+        except Exception as update_error:
+            try:
+                for object_id in updated_ids:
+                    collection.data.update(
+                        uuid=UUID(object_id),
+                        properties={"access_classification": previous[object_id]},
+                    )
+            except Exception as rollback_error:
+                logger.critical(
+                    "weaviate.classification_rollback_failed",
+                    document_id=document_id,
+                    error=str(rollback_error),
+                )
+                raise RuntimeError(
+                    "Weaviate classification update failed and rollback was incomplete."
+                ) from update_error
+            raise
+
+        return previous
+
+    def restore_document_access_classifications(
+        self,
+        previous_classifications: dict[str, str],
+    ) -> None:
+        """Restore classifications captured by update_document_access_classification."""
+        client = self._require_client()
+        collection = client.collections.get(_COLLECTION_NAME)
+        for object_id, classification in previous_classifications.items():
+            collection.data.update(
+                uuid=UUID(object_id),
+                properties={"access_classification": classification},
+            )
+
     # ── Retrieval Operations ───────────────────────────────────────────────────
 
     def vector_search(
@@ -334,7 +442,7 @@ class WeaviateClient:
         filters = (
             wvc.query.Filter.by_property("tenant_id").equal(tenant_id)
             & wvc.query.Filter.by_property("knowledge_base_id").equal(knowledge_base_id)
-            & wvc.query.Filter.by_property("access_classification").contains_any(levels)
+            & _access_classification_filter(levels)
         )
 
         response = collection.query.near_vector(
@@ -376,7 +484,7 @@ class WeaviateClient:
         filters = (
             wvc.query.Filter.by_property("tenant_id").equal(tenant_id)
             & wvc.query.Filter.by_property("knowledge_base_id").equal(knowledge_base_id)
-            & wvc.query.Filter.by_property("access_classification").contains_any(levels)
+            & _access_classification_filter(levels)
         )
 
         response = collection.query.bm25(

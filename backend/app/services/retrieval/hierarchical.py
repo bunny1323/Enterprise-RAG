@@ -19,15 +19,47 @@ class HierarchicalRetrievalService:
     def __init__(self, postgres: PostgresClient) -> None:
         self._postgres = postgres
 
+    async def get_accessible_chunk_ids(
+        self,
+        chunk_ids: list[str],
+        tenant_id: str = "default",
+        knowledge_base_id: str = "default",
+        permitted_access_levels: list[str] | None = None,
+    ) -> set[str]:
+        """Validate vector-store hits against authoritative PostgreSQL classifications."""
+        if not chunk_ids or permitted_access_levels == []:
+            return set()
+        access_levels = (
+            permitted_access_levels
+            if permitted_access_levels is not None
+            else ["PUBLIC", "INTERNAL"]
+        )
+        rows = await self._postgres.fetch(
+            """
+            SELECT chunk_id
+            FROM chunks
+            WHERE chunk_id = ANY($1::text[])
+              AND tenant_id = $2
+              AND knowledge_base_id = $3
+              AND access_classification = ANY($4::text[])
+            """,
+            list(set(chunk_ids)),
+            tenant_id,
+            knowledge_base_id,
+            access_levels,
+        )
+        return {str(row["chunk_id"]) for row in rows}
+
     async def expand_to_parents(
         self,
         results: list[SearchResult],
         tenant_id: str = "default",
         knowledge_base_id: str = "default",
+        permitted_access_levels: list[str] | None = None,
     ) -> list[SearchResult]:
         """Replace child results with their parent context where available."""
 
-        if not results:
+        if not results or permitted_access_levels == []:
             return []
 
         parent_ids = {
@@ -38,6 +70,11 @@ class HierarchicalRetrievalService:
 
         if not parent_ids:
             return results
+        access_levels = (
+            permitted_access_levels
+            if permitted_access_levels is not None
+            else ["PUBLIC", "INTERNAL"]
+        )
 
         rows = await self._postgres.fetch(
             """
@@ -56,10 +93,12 @@ class HierarchicalRetrievalService:
             WHERE chunk_id = ANY($1::text[])
               AND tenant_id = $2
               AND knowledge_base_id = $3
+              AND access_classification = ANY($4::text[])
             """,
             list(parent_ids),
             tenant_id,
             knowledge_base_id,
+            access_levels,
         )
 
         parents = {row["chunk_id"]: row for row in rows}

@@ -585,6 +585,9 @@ class TestDenseSparseFusion:
             side_effect=lambda query, candidates, top_n, relevance_queries=None: candidates[:top_n]
         )
         hierarchical = MagicMock()
+        hierarchical.get_accessible_chunk_ids = AsyncMock(
+            side_effect=lambda chunk_ids, **kwargs: set(chunk_ids)
+        )
         hierarchical.expand_to_parents = AsyncMock(side_effect=lambda results, **kwargs: results)
         decomposer = MagicMock()
         decomposer.decompose.return_value = [

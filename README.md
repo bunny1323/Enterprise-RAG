@@ -118,6 +118,19 @@ are for development only. `REDIS_URL` is optional. `GEMINI_API_KEY` is only
 needed with `VISION_PROVIDER=gemini`. Set `ADMIN_API_TOKEN` separately if
 administrator access is needed.
 
+### Document access classification
+
+Newly ingested documents default to `INTERNAL`. To make a document publicly
+retrievable, an authenticated administrator can explicitly classify the fully
+indexed document with `PATCH /api/v1/documents/{document_id}/classification`,
+sending `{"access_classification":"PUBLIC"}`. This operation updates and
+verifies all corresponding PostgreSQL and Weaviate chunks; it is unavailable to
+anonymous callers and fails rather than reporting success if the stores do not
+contain matching chunk counts. Enable API token authentication and use the
+configured administrator token for this operation. Re-ingestion applies the
+document's then-current pipeline classification, so verify the classification
+again after reprocessing.
+
 The backend blueprint attaches a persistent disk at `/data` for uploads,
 processed documents, and local model caches. Uploaded files are not durable
 without that disk. The app also needs enough memory and disk for its local

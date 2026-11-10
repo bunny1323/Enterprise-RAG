@@ -228,6 +228,7 @@ class RetrievalAgent:
 
             logger.info(
                 "retrieval_agent.start",
+                trace_id=query_state.trace_id,
                 query=norm.clean_query[:50],
                 intent=intent,
                 tenant=ctx.tenant_id,
@@ -254,48 +255,55 @@ class RetrievalAgent:
             # For COUNT_QUERY and LIST_QUERY (e.g., "How many major sections...",
             # "What are the major sections?"), query the canonical document_structure index.
             structure_access_allowed = (
-                permitted_access_levels is None
-                or "INTERNAL" in permitted_access_levels
+                permitted_access_levels is None or bool(permitted_access_levels)
             )
             if self._structure_svc and structure_access_allowed:
                 if intent == "COUNT_QUERY":
-                    count = await self._structure_svc.count_sections(
-                        tenant_id=ctx.tenant_id,
-                        knowledge_base_id=ctx.knowledge_base_id,
-                    )
                     sections = await self._structure_svc.list_sections(
                         tenant_id=ctx.tenant_id,
                         knowledge_base_id=ctx.knowledge_base_id,
+                        permitted_access_levels=permitted_access_levels,
                     )
-                    evidence = [
-                        SearchResult(
-                            chunk_id="struct::count::sections",
-                            score=1.0,
-                            content=(
-                                f"There are {count} major sections described in the service manual:\n"
-                                + "\n".join(f"- {s.section}" for s in sections)
-                            ),
-                            page_number=1,
-                            section="DOCUMENT STRUCTURE - MAJOR SECTIONS",
-                            metadata={"source": "document_structure", "count": count},
+                    if sections:
+                        section_trace = _trace_results(sections)
+                        return query_state.model_copy(
+                            update={
+                                "intent": intent,
+                                "intent_confidence": norm.intent_confidence,
+                                "fused_results": sections,
+                                "reranked_results": sections,
+                                "confidence_level": "HIGH",
+                                "confidence_score": 1.0,
+                                "strategy_used": "document_structure_count",
+                                "retrieval_diagnostics": {
+                                    "query": norm.raw_query,
+                                    "normalized_query": norm.clean_query,
+                                    "trace_id": query_state.trace_id,
+                                    "intent": intent,
+                                    "channels": {
+                                        "dense": [],
+                                        "bm25": [],
+                                        "graph": [],
+                                        "structural": section_trace,
+                                    },
+                                    "fused_candidates": section_trace,
+                                    "reranked_candidates": section_trace,
+                                    "selected_evidence": section_trace,
+                                    "embedding_dimension": None,
+                                    "permitted_access_levels": permitted_access_levels,
+                                    "scope": {
+                                        "tenant_id": ctx.tenant_id,
+                                        "knowledge_base_id": ctx.knowledge_base_id,
+                                    },
+                                },
+                            }
                         )
-                    ] + sections
-                    return query_state.model_copy(
-                        update={
-                            "intent": intent,
-                            "intent_confidence": norm.intent_confidence,
-                            "fused_results": evidence,
-                            "reranked_results": evidence,
-                            "confidence_level": "HIGH",
-                            "confidence_score": 1.0,
-                            "strategy_used": "document_structure_count",
-                        }
-                    )
 
                 elif intent == "LIST_QUERY":
                     sections = await self._structure_svc.list_sections(
                         tenant_id=ctx.tenant_id,
                         knowledge_base_id=ctx.knowledge_base_id,
+                        permitted_access_levels=permitted_access_levels,
                     )
                     if sections:
                         return query_state.model_copy(
@@ -307,6 +315,27 @@ class RetrievalAgent:
                                 "confidence_level": "HIGH",
                                 "confidence_score": 1.0,
                                 "strategy_used": "document_structure_list",
+                                "retrieval_diagnostics": {
+                                    "query": norm.raw_query,
+                                    "normalized_query": norm.clean_query,
+                                    "trace_id": query_state.trace_id,
+                                    "intent": intent,
+                                    "channels": {
+                                        "dense": [],
+                                        "bm25": [],
+                                        "graph": [],
+                                        "structural": _trace_results(sections),
+                                    },
+                                    "fused_candidates": _trace_results(sections),
+                                    "reranked_candidates": _trace_results(sections),
+                                    "selected_evidence": _trace_results(sections),
+                                    "embedding_dimension": None,
+                                    "permitted_access_levels": permitted_access_levels,
+                                    "scope": {
+                                        "tenant_id": ctx.tenant_id,
+                                        "knowledge_base_id": ctx.knowledge_base_id,
+                                    },
+                                },
                             }
                         )
 
@@ -316,6 +345,7 @@ class RetrievalAgent:
                         notation=notation,
                         tenant_id=ctx.tenant_id,
                         knowledge_base_id=ctx.knowledge_base_id,
+                        permitted_access_levels=permitted_access_levels,
                     )
                     if pf_results:
                         return query_state.model_copy(
@@ -327,6 +357,27 @@ class RetrievalAgent:
                                 "confidence_level": "HIGH",
                                 "confidence_score": 1.0,
                                 "strategy_used": "document_structure_page_format",
+                                "retrieval_diagnostics": {
+                                    "query": norm.raw_query,
+                                    "normalized_query": norm.clean_query,
+                                    "trace_id": query_state.trace_id,
+                                    "intent": intent,
+                                    "channels": {
+                                        "dense": [],
+                                        "bm25": [],
+                                        "graph": [],
+                                        "structural": _trace_results(pf_results),
+                                    },
+                                    "fused_candidates": _trace_results(pf_results),
+                                    "reranked_candidates": _trace_results(pf_results),
+                                    "selected_evidence": _trace_results(pf_results),
+                                    "embedding_dimension": None,
+                                    "permitted_access_levels": permitted_access_levels,
+                                    "scope": {
+                                        "tenant_id": ctx.tenant_id,
+                                        "knowledge_base_id": ctx.knowledge_base_id,
+                                    },
+                                },
                             }
                         )
 
@@ -355,7 +406,6 @@ class RetrievalAgent:
                 )
 
                 query_vec = query_vectors[0] if query_vectors else []
-
                 if query_vec and self._cache_svc:
                     try:
                         await self._cache_svc.set_query_embedding(
@@ -368,6 +418,15 @@ class RetrievalAgent:
                             "retrieval_agent.embedding_cache_store_failed",
                             error=str(err),
                         )
+
+            embedding_dimension = len(query_vec) if query_vec else 0
+            logger.info(
+                "retrieval_agent.embedding_complete",
+                trace_id=query_state.trace_id,
+                provider=getattr(self._embedder, "provider_name", "local"),
+                model=getattr(self._embedder, "_model_name", "unknown"),
+                dimension=embedding_dimension,
+            )
 
             # 2. Parallel retrieval channels
             extra_ranked_lists: list[list[SearchResult]] = []
@@ -608,6 +667,53 @@ class RetrievalAgent:
                 elif key == "graph":
                     graph_results = res
 
+            candidate_lists = [
+                dense_results,
+                bm25_results,
+                graph_results,
+                morph_results,
+                typo_results,
+                *extra_ranked_lists,
+            ]
+            candidate_ids = [
+                result.chunk_id
+                for result_list in candidate_lists
+                for result in result_list
+                if result.chunk_id
+            ]
+            accessible_ids: set[str] = set()
+            if candidate_ids:
+                accessible_ids = await self._hierarchical_svc.get_accessible_chunk_ids(
+                    candidate_ids,
+                    tenant_id=ctx.tenant_id,
+                    knowledge_base_id=ctx.knowledge_base_id,
+                    permitted_access_levels=permitted_access_levels,
+                )
+                logger.info(
+                    "retrieval_agent.postgres_access_validation",
+                    trace_id=query_state.trace_id,
+                    candidates=len(candidate_ids),
+                    accessible=len(accessible_ids),
+                )
+
+            def keep_accessible(results: list[SearchResult]) -> list[SearchResult]:
+                return [result for result in results if result.chunk_id in accessible_ids]
+
+            dense_results = keep_accessible(dense_results)
+            bm25_results = keep_accessible(bm25_results)
+            graph_results = keep_accessible(graph_results)
+            morph_results = keep_accessible(morph_results)
+            typo_results = keep_accessible(typo_results)
+            extra_ranked_lists = [
+                keep_accessible(result_list) for result_list in extra_ranked_lists
+            ]
+            for subquery in subquery_diagnostics:
+                for channel_name, channel_results in subquery.get("channels", {}).items():
+                    subquery["channels"][channel_name] = [
+                        result for result in channel_results
+                        if result.get("chunk_id") in accessible_ids
+                    ]
+
             channel_lists = []
             if dense_results:
                 channel_lists.append(dense_results)
@@ -619,6 +725,7 @@ class RetrievalAgent:
 
             logger.info(
                 "retrieval_agent.candidates",
+                trace_id=query_state.trace_id,
                 dense=len(dense_results),
                 bm25=len(bm25_results),
                 subquery=sum(len(result_list) for result_list in extra_ranked_lists),
@@ -750,6 +857,7 @@ class RetrievalAgent:
                     reranked,
                     tenant_id=ctx.tenant_id,
                     knowledge_base_id=ctx.knowledge_base_id,
+                    permitted_access_levels=permitted_access_levels,
                 )
                 if intent == "SECTION_LOOKUP":
                     hierarchical_results = _section_lookup_evidence(
@@ -779,6 +887,9 @@ class RetrievalAgent:
 
             logger.info(
                 "retrieval_agent.complete",
+                trace_id=query_state.trace_id,
+                tenant_id=ctx.tenant_id,
+                knowledge_base_id=ctx.knowledge_base_id,
                 fused_count=len(fused),
                 reranked_count=len(reranked),
                 hierarchical_count=len(hierarchical_results) if channel_lists else 0,
@@ -797,6 +908,7 @@ class RetrievalAgent:
                     "fused_results": fused,
                     "reranked_results": hierarchical_results if channel_lists else [],
                     "retrieval_diagnostics": {
+                        "trace_id": query_state.trace_id,
                         "query": norm.raw_query,
                         "normalized_query": norm.clean_query,
                         "retrieval_query": norm.retrieval_query,
@@ -809,11 +921,18 @@ class RetrievalAgent:
                             "bm25_morph": _trace_results(morph_results),
                             "bm25_typo": _trace_results(typo_results),
                             "graph": _trace_results(graph_results),
+                            "structural": [],
                         },
                         "fused_candidates": _trace_results(fused),
                         "reranked_candidates": _trace_results(reranked_wide),
                         "selected_candidates": _trace_results(reranked),
                         "selected_evidence": _trace_results(hierarchical_results),
+                        "embedding_dimension": embedding_dimension,
+                        "permitted_access_levels": permitted_access_levels,
+                        "scope": {
+                            "tenant_id": ctx.tenant_id,
+                            "knowledge_base_id": ctx.knowledge_base_id,
+                        },
                         "selected_sources": sorted({_source_key(item) for item in hierarchical_results}),
                         "degraded_channels": degraded_channels,
                     },

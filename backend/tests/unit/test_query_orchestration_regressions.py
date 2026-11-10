@@ -174,6 +174,45 @@ async def test_cache_failure_degrades_to_uncached_query():
 
 
 @pytest.mark.asyncio
+async def test_cache_hit_populates_intent():
+    cache = MagicMock()
+    cache.get_response = AsyncMock(return_value={
+        "answer": "Cached answer.",
+        "citations": [],
+        "sources": [],
+        "confidence": "HIGH",
+        "confidence_score": 1.0,
+        "verification_status": "SUPPORTED",
+        "retrieval_strategy": "exact_cache",
+    })
+    nodes = QueryNodes(
+        retrieval_agent=MagicMock(),
+        llm_provider=MagicMock(),
+        citation_svc=CitationService(),
+        verifier_svc=GroundednessVerificationService(),
+        opa_client=MagicMock(),
+        cache_svc=cache,
+        normalizer=QueryNormalizationService(),
+    )
+    state = {
+        "query": "What is the hydraulic oil capacity?",
+        "original_query": "What is the hydraulic oil capacity?",
+        "tenant_context": TenantContext(),
+        "permitted_access_levels": ["PUBLIC", "INTERNAL"],
+        "cache_hit": False,
+        "intent": "",
+        "intent_confidence": 0.0,
+        "error_message": None,
+    }
+
+    result = await nodes.check_cache(state)
+
+    assert result["cache_hit"] is True
+    assert result["intent"] == "SPECIFICATION"
+    assert result["intent_confidence"] > 0.0
+
+
+@pytest.mark.asyncio
 async def test_query_embedding_cache_failures_degrade_to_live_embedding():
     embedder = MagicMock()
     embedder.embed_batch.return_value = [[0.1, 0.2]]

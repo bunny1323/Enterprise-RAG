@@ -3,25 +3,32 @@ Document API routes.
 POST /api/v1/documents      — persist PDF and register an asynchronous ingestion job
 GET  /api/v1/documents/{id}/status — poll ingestion status
 """
+import asyncio
 import uuid
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile, status
+from pydantic import BaseModel
 
+from app.agents.supervisor.agent import IngestionSupervisor
 from app.api.dependencies import (
     PostgresDep,
     SupervisorDep,
     TenantContextDep,
     get_supervisor,
+    require_admin_access,
     require_authenticated_access,
 )
-from app.agents.supervisor.agent import IngestionSupervisor
 from app.config.logging import get_logger
 from app.models.document import DocumentStatusResponse
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/v1/documents", tags=["documents"])
+
+
+class ClassificationRequest(BaseModel):
+    access_classification: Literal["PUBLIC", "INTERNAL", "RESTRICTED"]
 
 
 @router.post(
@@ -94,6 +101,152 @@ async def upload_document(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Upload failed: {str(err)}",
         ) from err
+
+
+@router.patch(
+    "/{document_id}/classification",
+    summary="Set document access classification",
+)
+async def set_document_classification(
+    document_id: str,
+    body: ClassificationRequest,
+    request: Request,
+    postgres: PostgresDep,
+    tenant_ctx: TenantContextDep,
+) -> dict[str, Any]:
+    """Set a document's classification across PostgreSQL and Weaviate."""
+    require_admin_access(tenant_ctx, "Document classification")
+    try:
+        doc_uuid = uuid.UUID(document_id)
+    except ValueError as err:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid document_id format.",
+        ) from err
+
+    document = await postgres.fetchrow(
+        """
+        SELECT id, status
+        FROM documents
+        WHERE id = $1 AND tenant_id = $2 AND knowledge_base_id = $3
+        """,
+        doc_uuid,
+        tenant_ctx.tenant_id,
+        tenant_ctx.knowledge_base_id,
+    )
+    if document is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found in the authorized tenant and knowledge base.",
+        )
+    if document.get("status") != "COMPLETED":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Only fully indexed documents can be reclassified.",
+        )
+
+    chunk_count = await postgres.fetchval(
+        """
+        SELECT COUNT(*)
+        FROM chunks
+        WHERE document_id = $1 AND tenant_id = $2 AND knowledge_base_id = $3
+        """,
+        doc_uuid,
+        tenant_ctx.tenant_id,
+        tenant_ctx.knowledge_base_id,
+    )
+    if not chunk_count:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Document has no indexed chunks to classify.",
+        )
+
+    weaviate_client = getattr(request.app.state, "weaviate", None)
+    if weaviate_client is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Classification storage is unavailable.",
+        )
+
+    previous_weaviate_classifications: dict[str, str] | None = None
+    previous_postgres_classifications: dict[str, str | None] | None = None
+    try:
+        previous_postgres_classifications = await postgres.set_document_access_classification(
+            document_id=doc_uuid,
+            tenant_id=tenant_ctx.tenant_id,
+            knowledge_base_id=tenant_ctx.knowledge_base_id,
+            access_classification="PENDING",
+            expected_chunk_count=int(chunk_count),
+        )
+        previous_weaviate_classifications = await asyncio.to_thread(
+            weaviate_client.update_document_access_classification,
+            str(doc_uuid),
+            tenant_ctx.tenant_id,
+            tenant_ctx.knowledge_base_id,
+            body.access_classification,
+            int(chunk_count),
+        )
+        await postgres.set_document_access_classification(
+            document_id=doc_uuid,
+            tenant_id=tenant_ctx.tenant_id,
+            knowledge_base_id=tenant_ctx.knowledge_base_id,
+            access_classification=body.access_classification,
+            expected_chunk_count=int(chunk_count),
+        )
+    except Exception as err:
+        rollback_errors: list[Exception] = []
+        if previous_postgres_classifications is not None:
+            try:
+                await postgres.restore_document_access_classification(
+                    document_id=doc_uuid,
+                    tenant_id=tenant_ctx.tenant_id,
+                    knowledge_base_id=tenant_ctx.knowledge_base_id,
+                    previous_classifications=previous_postgres_classifications,
+                )
+            except Exception as rollback_error:
+                rollback_errors.append(rollback_error)
+        if previous_weaviate_classifications is not None:
+            try:
+                await asyncio.to_thread(
+                    weaviate_client.restore_document_access_classifications,
+                    previous_weaviate_classifications,
+                )
+            except Exception as rollback_error:
+                rollback_errors.append(rollback_error)
+        if rollback_errors:
+            logger.critical(
+                "documents.classification_rollback_failed",
+                document_id=str(doc_uuid),
+                errors=[str(error) for error in rollback_errors],
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Classification update failed and storage reconciliation is required.",
+            ) from err
+        logger.error(
+            "documents.classification_update_failed",
+            document_id=str(doc_uuid),
+            tenant_id=tenant_ctx.tenant_id,
+            error=str(err),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Classification update could not be completed.",
+        ) from err
+
+    logger.info(
+        "documents.classification_updated",
+        document_id=str(doc_uuid),
+        tenant_id=tenant_ctx.tenant_id,
+        knowledge_base_id=tenant_ctx.knowledge_base_id,
+        access_classification=body.access_classification,
+        chunks=int(chunk_count),
+    )
+    return {
+        "document_id": str(doc_uuid),
+        "access_classification": body.access_classification,
+        "updated_chunks": int(chunk_count),
+    }
 
 
 @router.get(

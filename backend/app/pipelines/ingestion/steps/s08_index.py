@@ -233,6 +233,7 @@ async def _insert_chunks_postgres(
                 section_title         = EXCLUDED.section_title,
                 file_name             = EXCLUDED.file_name,
                 context_prefix        = EXCLUDED.context_prefix,
+                access_classification = EXCLUDED.access_classification,
                 metadata              = EXCLUDED.metadata
             """,
             chunk.chunk_id,

@@ -287,6 +287,15 @@ def require_authenticated_access(tenant_ctx: TenantContext, operation: str) -> N
         )
 
 
+def require_admin_access(tenant_ctx: TenantContext, operation: str) -> None:
+    """Require a verified administrator identity for privileged operations."""
+    if not tenant_ctx.claims.get("is_authenticated") or not tenant_ctx.claims.get("is_admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"{operation} requires an authenticated administrator.",
+        )
+
+
 TenantContextDep = Annotated[TenantContext, Depends(get_tenant_context)]
 
 

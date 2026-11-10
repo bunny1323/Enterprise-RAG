@@ -638,13 +638,120 @@ class PostgresClient:
 
     # ── Document Structure Helpers ─────────────────────────────────────────────
 
+    async def set_document_access_classification(
+        self,
+        document_id: UUID,
+        tenant_id: str,
+        knowledge_base_id: str,
+        access_classification: str,
+        expected_chunk_count: int,
+    ) -> dict[str, str | None]:
+        """Atomically classify all document chunks and return their prior levels."""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                rows = await conn.fetch(
+                    """
+                    SELECT chunk_id, access_classification
+                    FROM chunks
+                    WHERE document_id = $1 AND tenant_id = $2 AND knowledge_base_id = $3
+                    FOR UPDATE
+                    """,
+                    document_id,
+                    tenant_id,
+                    knowledge_base_id,
+                )
+                if len(rows) != expected_chunk_count:
+                    raise RuntimeError(
+                        "PostgreSQL and Weaviate chunk counts differ; classification update was not applied."
+                    )
+                previous = {
+                    str(row["chunk_id"]): row["access_classification"]
+                    for row in rows
+                }
+                await conn.execute(
+                    """
+                    UPDATE chunks
+                    SET access_classification = $4
+                    WHERE document_id = $1 AND tenant_id = $2 AND knowledge_base_id = $3
+                    """,
+                    document_id,
+                    tenant_id,
+                    knowledge_base_id,
+                    access_classification,
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO knowledge_base_versions (
+                        knowledge_base_id, tenant_id, version, updated_at
+                    )
+                    VALUES ($1, $2, 1, NOW())
+                    ON CONFLICT (knowledge_base_id, tenant_id) DO UPDATE
+                    SET version = knowledge_base_versions.version + 1,
+                        updated_at = NOW()
+                    """,
+                    knowledge_base_id,
+                    tenant_id,
+                )
+                return previous
+
+    async def restore_document_access_classification(
+        self,
+        document_id: UUID,
+        tenant_id: str,
+        knowledge_base_id: str,
+        previous_classifications: dict[str, str | None],
+    ) -> None:
+        """Restore a prior per-chunk classification snapshot after a failed update."""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                for chunk_id, classification in previous_classifications.items():
+                    result = await conn.execute(
+                        """
+                        UPDATE chunks
+                        SET access_classification = $4
+                        WHERE chunk_id = $1 AND document_id = $2
+                          AND tenant_id = $3 AND knowledge_base_id = $5
+                        """,
+                        chunk_id,
+                        document_id,
+                        tenant_id,
+                        classification,
+                        knowledge_base_id,
+                    )
+                    if result != "UPDATE 1":
+                        raise RuntimeError(
+                            "PostgreSQL classification rollback did not update every chunk."
+                        )
+                await conn.execute(
+                    """
+                    INSERT INTO knowledge_base_versions (
+                        knowledge_base_id, tenant_id, version, updated_at
+                    )
+                    VALUES ($1, $2, 1, NOW())
+                    ON CONFLICT (knowledge_base_id, tenant_id) DO UPDATE
+                    SET version = knowledge_base_versions.version + 1,
+                        updated_at = NOW()
+                    """,
+                    knowledge_base_id,
+                    tenant_id,
+                )
+
     async def get_sections(
         self,
         tenant_id: str,
         knowledge_base_id: str,
         document_id: str | None = None,
+        permitted_access_levels: list[str] | None = None,
     ) -> list[dict]:
-        """Return all section entries from document_structure, ordered by section number."""
+        """Return structure only for documents wholly within the allowed access scope."""
+        access_levels = (
+            permitted_access_levels
+            if permitted_access_levels is not None
+            else ["PUBLIC", "INTERNAL"]
+        )
+        if not access_levels:
+            return []
+
         if document_id:
             return await self.fetch(
                 """
@@ -654,11 +761,23 @@ class PostgresClient:
                   AND tenant_id = $1
                   AND knowledge_base_id = $2
                   AND document_id = $3::uuid
+                  AND document_id IN (
+                      SELECT c.document_id
+                      FROM chunks c
+                      WHERE c.tenant_id = $1 AND c.knowledge_base_id = $2
+                      GROUP BY c.document_id
+                      HAVING COUNT(*) > 0
+                         AND COUNT(*) FILTER (
+                             WHERE c.access_classification IS NULL
+                                OR NOT (c.access_classification = ANY($4::text[]))
+                         ) = 0
+                  )
                 ORDER BY number ASC
                 """,
                 tenant_id,
                 knowledge_base_id,
                 document_id,
+                access_levels,
             )
         return await self.fetch(
             """
@@ -667,10 +786,22 @@ class PostgresClient:
             WHERE structure_type = 'section'
               AND tenant_id = $1
               AND knowledge_base_id = $2
+              AND document_id IN (
+                  SELECT c.document_id
+                  FROM chunks c
+                  WHERE c.tenant_id = $1 AND c.knowledge_base_id = $2
+                  GROUP BY c.document_id
+                  HAVING COUNT(*) > 0
+                     AND COUNT(*) FILTER (
+                         WHERE c.access_classification IS NULL
+                            OR NOT (c.access_classification = ANY($3::text[]))
+                     ) = 0
+              )
             ORDER BY number ASC
             """,
             tenant_id,
             knowledge_base_id,
+            access_levels,
         )
 
     async def count_sections(
@@ -678,8 +809,17 @@ class PostgresClient:
         tenant_id: str,
         knowledge_base_id: str,
         document_id: str | None = None,
+        permitted_access_levels: list[str] | None = None,
     ) -> int:
-        """Return the count of unique major sections in document_structure."""
+        """Count sections only for documents wholly within the allowed scope."""
+        access_levels = (
+            permitted_access_levels
+            if permitted_access_levels is not None
+            else ["PUBLIC", "INTERNAL"]
+        )
+        if not access_levels:
+            return 0
+
         if document_id:
             val = await self.fetchval(
                 """
@@ -690,10 +830,22 @@ class PostgresClient:
                   AND knowledge_base_id = $2
                   AND document_id = $3::uuid
                   AND number IS NOT NULL
+                  AND document_id IN (
+                      SELECT c.document_id
+                      FROM chunks c
+                      WHERE c.tenant_id = $1 AND c.knowledge_base_id = $2
+                      GROUP BY c.document_id
+                      HAVING COUNT(*) > 0
+                         AND COUNT(*) FILTER (
+                             WHERE c.access_classification IS NULL
+                                OR NOT (c.access_classification = ANY($4::text[]))
+                         ) = 0
+                  )
                 """,
                 tenant_id,
                 knowledge_base_id,
                 document_id,
+                access_levels,
             )
         else:
             val = await self.fetchval(
@@ -704,9 +856,21 @@ class PostgresClient:
                   AND tenant_id = $1
                   AND knowledge_base_id = $2
                   AND number IS NOT NULL
+                  AND document_id IN (
+                      SELECT c.document_id
+                      FROM chunks c
+                      WHERE c.tenant_id = $1 AND c.knowledge_base_id = $2
+                      GROUP BY c.document_id
+                      HAVING COUNT(*) > 0
+                         AND COUNT(*) FILTER (
+                             WHERE c.access_classification IS NULL
+                                OR NOT (c.access_classification = ANY($3::text[]))
+                         ) = 0
+                  )
                 """,
                 tenant_id,
                 knowledge_base_id,
+                access_levels,
             )
         return int(val or 0)
 
@@ -715,8 +879,17 @@ class PostgresClient:
         tenant_id: str,
         knowledge_base_id: str,
         notation: str | None = None,
+        permitted_access_levels: list[str] | None = None,
     ) -> list[dict]:
-        """Return page-format explanation entries, optionally filtering by notation."""
+        """Return page-format entries only for documents within the allowed scope."""
+        access_levels = (
+            permitted_access_levels
+            if permitted_access_levels is not None
+            else ["PUBLIC", "INTERNAL"]
+        )
+        if not access_levels:
+            return []
+
         if notation:
             return await self.fetch(
                 """
@@ -726,11 +899,23 @@ class PostgresClient:
                   AND tenant_id = $1
                   AND knowledge_base_id = $2
                   AND (raw_text ILIKE $3 OR metadata::text ILIKE $3)
+                  AND document_id IN (
+                      SELECT c.document_id
+                      FROM chunks c
+                      WHERE c.tenant_id = $1 AND c.knowledge_base_id = $2
+                      GROUP BY c.document_id
+                      HAVING COUNT(*) > 0
+                         AND COUNT(*) FILTER (
+                             WHERE c.access_classification IS NULL
+                                OR NOT (c.access_classification = ANY($4::text[]))
+                         ) = 0
+                  )
                 ORDER BY page_number ASC
                 """,
                 tenant_id,
                 knowledge_base_id,
                 f"%{notation}%",
+                access_levels,
             )
         return await self.fetch(
             """
@@ -739,10 +924,22 @@ class PostgresClient:
             WHERE structure_type = 'page_format'
               AND tenant_id = $1
               AND knowledge_base_id = $2
+              AND document_id IN (
+                  SELECT c.document_id
+                  FROM chunks c
+                  WHERE c.tenant_id = $1 AND c.knowledge_base_id = $2
+                  GROUP BY c.document_id
+                  HAVING COUNT(*) > 0
+                     AND COUNT(*) FILTER (
+                         WHERE c.access_classification IS NULL
+                            OR NOT (c.access_classification = ANY($3::text[]))
+                     ) = 0
+              )
             ORDER BY page_number ASC
             """,
             tenant_id,
             knowledge_base_id,
+            access_levels,
         )
 
     async def close(self) -> None:

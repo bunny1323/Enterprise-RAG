@@ -4,12 +4,15 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from httpx import ASGITransport, AsyncClient
 
-from app.api.dependencies import get_tenant_context
-from app.api.dependencies import require_authenticated_access
+from app.api.dependencies import get_settings_dep, get_tenant_context, require_authenticated_access
+from app.api.routes import query as query_routes
+from app.api.routes.documents import delete_document, upload_document
 from app.api.routes.health import health_check, readiness_check
 from app.api.routes.images import get_document_image
+from app.api.routes.jobs import cancel_job
 from app.config.settings import Settings
 from app.infrastructure.opa.client import OPAClient
 from app.models.tenant import TenantContext
@@ -46,9 +49,26 @@ async def test_opa_transport_error_denies_retrieval():
     await client.close()
 
 
+def test_opa_enabled_environment_flag_is_read_as_disabled(monkeypatch):
+    monkeypatch.setenv("OPA_ENABLED", "false")
+
+    settings = Settings(
+        _env_file=None,
+        app_env="production",
+        api_key_auth_enabled=False,
+        database_url="postgresql://localhost/test",
+        weaviate_url="https://weaviate.example.com",
+        weaviate_api_key="test-key",
+        neo4j_password="test-password",
+    )
+
+    assert settings.opa_enabled is False
+
+
 @pytest.mark.asyncio
 async def test_disabled_opa_allows_only_authenticated_public_reads_in_authorized_scopes():
     client = OPAClient(enabled=False)
+    client._http.post = AsyncMock()
     context = TenantContext(
         tenant_id="tenant-a",
         knowledge_base_id="manuals",
@@ -61,13 +81,13 @@ async def test_disabled_opa_allows_only_authenticated_public_reads_in_authorized
     )
 
     decision = await client.evaluate_retrieval_policy(context)
+    client._http.post.assert_not_awaited()
 
     assert decision.allowed is True
     assert decision.permitted_access_levels == ["PUBLIC"]
     assert decision.permitted_tenants == ["tenant-a"]
-    client._http.post = AsyncMock()
     await client.evaluate_retrieval_policy(context)
-    client._http.post.assert_not_called()
+    client._http.post.assert_not_awaited()
     await client.close()
 
 
@@ -88,27 +108,285 @@ async def test_disabled_opa_allows_unauthenticated_only_in_explicit_default_publ
     )
     context = get_tenant_context(request, settings)
     client = OPAClient(enabled=False)
+    client._http.post = AsyncMock()
+    client._http.get = AsyncMock()
 
     decision = await client.evaluate_retrieval_policy(context)
     protected_action = await client.evaluate_retrieval_policy(context, action="write")
     other_scope = context.model_copy(update={"knowledge_base_id": "other"})
     other_kb_decision = await client.evaluate_retrieval_policy(other_scope)
+    health_check = await client.health_check()
 
     assert decision.allowed is True
     assert decision.permitted_access_levels == ["PUBLIC"]
     assert decision.permitted_tenants == ["tenant-primary"]
     assert protected_action.allowed is False
     assert other_kb_decision.allowed is False
+    assert health_check is False
+    client._http.post.assert_not_awaited()
+    client._http.get.assert_not_awaited()
     await client.close()
 
 
-def test_protected_data_operations_are_denied_in_production_auth_disabled_mode():
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "Document upload",
+        "Document deletion",
+        "Job cancellation",
+        "Feedback submission",
+        "Administrative operation",
+    ],
+)
+def test_protected_data_operations_are_denied_in_production_auth_disabled_mode(operation):
     context = TenantContext(
         claims={"api_auth_disabled_public_only": True, "is_authenticated": False}
     )
 
-    with pytest.raises(HTTPException, match="unavailable while API token authentication is disabled"):
-        require_authenticated_access(context, "Document upload")
+    with pytest.raises(
+        HTTPException,
+        match="unavailable while API token authentication is disabled",
+    ):
+        require_authenticated_access(context, operation)
+
+
+@pytest.mark.asyncio
+async def test_anonymous_feedback_write_is_denied():
+    context = TenantContext(
+        claims={"api_auth_disabled_public_only": True, "is_authenticated": False}
+    )
+
+    with pytest.raises(HTTPException, match="Feedback submission is unavailable"):
+        await query_routes.submit_feedback(
+            query_routes.FeedbackRequest(query_id="query-1", rating=1),
+            context,
+        )
+
+
+@pytest.mark.asyncio
+async def test_anonymous_document_and_job_mutations_are_denied_before_backend_access():
+    context = TenantContext(
+        claims={"api_auth_disabled_public_only": True, "is_authenticated": False}
+    )
+
+    with pytest.raises(HTTPException, match="Document upload is unavailable"):
+        await upload_document(None, tenant_ctx=context, supervisor=None)
+    with pytest.raises(HTTPException, match="Document deletion is unavailable"):
+        await delete_document("document-id", None, context, None)
+    with pytest.raises(HTTPException, match="Job cancellation is unavailable"):
+        await cancel_job("job-id", None, context)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("access_level", ["INTERNAL", "RESTRICTED"])
+async def test_disabled_opa_denies_protected_access_levels(access_level):
+    settings = Settings(
+        _env_file=None,
+        app_env="production",
+        api_key_auth_enabled=False,
+        opa_enabled=False,
+        default_tenant_id="tenant-primary",
+    )
+    request = SimpleNamespace(
+        headers={},
+        query_params={},
+        client=SimpleNamespace(host="127.0.0.1"),
+        url=SimpleNamespace(path="/api/v1/chat"),
+    )
+    context = get_tenant_context(request, settings).model_copy(
+        update={"access_level": access_level}
+    )
+    client = OPAClient(enabled=False)
+    client._http.post = AsyncMock()
+
+    decision = await client.evaluate_retrieval_policy(context)
+
+    assert decision.allowed is False
+    assert decision.permitted_access_levels == []
+    client._http.post.assert_not_awaited()
+    await client.close()
+
+
+def test_anonymous_headers_cannot_override_tenant_or_knowledge_base():
+    settings = Settings(
+        _env_file=None,
+        app_env="production",
+        api_key_auth_enabled=False,
+        opa_enabled=False,
+        default_tenant_id="tenant-primary",
+    )
+    request = SimpleNamespace(
+        headers={
+            "X-Tenant-ID": "tenant-other",
+            "X-Knowledge-Base-ID": "other",
+            "X-Access-Level": "RESTRICTED",
+        },
+        query_params={},
+        client=SimpleNamespace(host="127.0.0.1"),
+        url=SimpleNamespace(path="/api/v1/chat"),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        get_tenant_context(request, settings)
+
+    assert exc_info.value.status_code == 403
+
+    request.headers = {"X-Knowledge-Base-ID": "other"}
+    with pytest.raises(HTTPException) as exc_info:
+        get_tenant_context(request, settings)
+    assert exc_info.value.status_code == 403
+
+    request.headers = {"X-Access-Level": "RESTRICTED"}
+    context = get_tenant_context(request, settings)
+    assert context.tenant_id == "tenant-primary"
+    assert context.knowledge_base_id == "default"
+    assert context.access_level == "PUBLIC"
+
+
+@pytest.mark.asyncio
+async def test_opa_enabled_calls_configured_policy_endpoint():
+    client = OPAClient("https://policy.example.com", enabled=True)
+    client._http.post = AsyncMock(
+        return_value=MagicMock(
+            status_code=200,
+            json=MagicMock(
+                return_value={
+                    "result": {
+                        "allowed": True,
+                        "permitted_access_levels": ["PUBLIC"],
+                    }
+                }
+            ),
+        )
+    )
+    context = TenantContext(
+        tenant_id="tenant-a",
+        claims={"is_authenticated": True},
+    )
+
+    decision = await client.evaluate_retrieval_policy(context)
+
+    assert decision.allowed is True
+    client._http.post.assert_awaited_once()
+    assert client._http.post.await_args.args[0] == (
+        "https://policy.example.com/v1/data/rag/authz/allow"
+    )
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_authorized_chat_policy_is_not_rechecked_by_langgraph(monkeypatch):
+    settings = Settings(
+        _env_file=None,
+        app_env="production",
+        api_key_auth_enabled=False,
+        opa_enabled=False,
+        default_tenant_id="tenant-primary",
+        database_url="postgresql://localhost/test",
+        weaviate_url="https://weaviate.example.com",
+        weaviate_api_key="test-key",
+        neo4j_password="test-password",
+        pii_detection_enabled=False,
+    )
+    opa = OPAClient(enabled=False)
+    opa._http.post = AsyncMock()
+    evaluate_policy = AsyncMock(wraps=opa.evaluate_retrieval_policy)
+    opa.evaluate_retrieval_policy = evaluate_policy
+    app = FastAPI()
+    app.include_router(query_routes.router)
+    app.dependency_overrides[get_settings_dep] = lambda: settings
+    app.state.postgres = MagicMock()
+    app.state.checkpointer = None
+    app.state.redis = None
+    app.state.embedder = MagicMock()
+    app.state.llm_provider = MagicMock()
+    app.state.weaviate = MagicMock()
+    app.state.neo4j = MagicMock()
+    app.state.opa = opa
+
+    async def invoke_authorized_workflow(nodes, state):
+        assert state["tenant_context"].tenant_id == "tenant-primary"
+        assert state["tenant_context"].knowledge_base_id == "default"
+        assert state["tenant_context"].access_level == "PUBLIC"
+        assert state["permitted_access_levels"] == ["PUBLIC"]
+        assert state["policy_authorized"] is True
+
+        authorized_state = await nodes.evaluate_policy(state)
+        assert authorized_state.get("error_message") is None
+        return {
+            **authorized_state,
+            "answer": "Answer based on public evidence.",
+            "intent": "GENERAL_QA",
+            "intent_confidence": 1.0,
+            "reranked_results": [],
+            "citations": [],
+            "sources": [],
+            "confidence_level": "HIGH",
+            "confidence_score": 1.0,
+            "verification_status": "SUPPORTED",
+            "retrieval_strategy": "dense",
+        }
+
+    class FakeGraph:
+        def __init__(self, nodes):
+            self.nodes = nodes
+
+        async def ainvoke(self, state, config):
+            return await invoke_authorized_workflow(self.nodes, state)
+
+    def fake_build_query_graph(nodes, checkpointer=None):
+        return FakeGraph(nodes)
+
+    monkeypatch.setattr(query_routes, "_build_retrieval_agent", lambda *args: MagicMock())
+    monkeypatch.setattr(query_routes, "build_query_graph", fake_build_query_graph)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post("/api/v1/chat", json={"query": "What is in the manual?"})
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == "Answer based on public evidence."
+    evaluate_policy.assert_awaited_once()
+    opa._http.post.assert_not_awaited()
+    await opa.close()
+
+
+@pytest.mark.asyncio
+async def test_disabled_opa_chat_rejects_anonymous_tenant_and_kb_overrides(monkeypatch):
+    settings = Settings(
+        _env_file=None,
+        app_env="production",
+        api_key_auth_enabled=False,
+        opa_enabled=False,
+        default_tenant_id="tenant-primary",
+    )
+    app = FastAPI()
+    app.include_router(query_routes.router)
+    app.dependency_overrides[get_settings_dep] = lambda: settings
+    app.state.postgres = MagicMock()
+    app.state.checkpointer = None
+    app.state.opa = OPAClient(enabled=False)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        tenant_response = await client.post(
+            "/api/v1/chat",
+            headers={"X-Tenant-ID": "tenant-other"},
+            json={"query": "test"},
+        )
+        knowledge_base_response = await client.post(
+            "/api/v1/chat",
+            headers={"X-Knowledge-Base-ID": "other"},
+            json={"query": "test"},
+        )
+
+    assert tenant_response.status_code == 403
+    assert knowledge_base_response.status_code == 403
+    await app.state.opa.close()
 
 
 @pytest.mark.asyncio

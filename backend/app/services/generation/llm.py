@@ -290,6 +290,46 @@ def get_intent_system_instruction(intent: str | None = None, query: str | None =
             "- List the safety and purpose categories explicitly as defined in the retrieved evidence.\n"
             "- Use only the indexed wording from the evidence and do not invent symbol names or safety rules."
         )
+    elif intent == "PROCEDURE":
+        return (
+            DEFAULT_SYSTEM_INSTRUCTION + "\n\n"
+            "SPECIFIC DIRECTIVE FOR PROCEDURAL QUESTIONS:\n"
+            "- Present the steps in the exact sequence documented in the retrieved evidence.\n"
+            "- Number each step clearly and preserve all safety warnings associated with individual steps.\n"
+            "- Do NOT skip, reorder, or combine steps even if they appear redundant."
+        )
+    elif intent == "MAINTENANCE":
+        return (
+            DEFAULT_SYSTEM_INSTRUCTION + "\n\n"
+            "SPECIFIC DIRECTIVE FOR MAINTENANCE QUESTIONS:\n"
+            "- State the exact service intervals, component names, and part numbers as given in the evidence.\n"
+            "- Include any safety precautions or prerequisites mentioned alongside the maintenance task.\n"
+            "- Do NOT substitute component names or invent intervals not present in the evidence."
+        )
+    elif intent == "SPECIFICATION":
+        return (
+            DEFAULT_SYSTEM_INSTRUCTION + "\n\n"
+            "SPECIFIC DIRECTIVE FOR SPECIFICATION QUESTIONS:\n"
+            "- Quote exact numerical values, units, and tolerances directly from the retrieved evidence.\n"
+            "- Include the full context (e.g. operating condition, model variant) if stated in the evidence.\n"
+            "- Do NOT round, estimate, or convert values unless the evidence explicitly provides the conversion."
+        )
+    elif intent == "TROUBLESHOOTING":
+        return (
+            DEFAULT_SYSTEM_INSTRUCTION + "\n\n"
+            "SPECIFIC DIRECTIVE FOR TROUBLESHOOTING QUESTIONS:\n"
+            "- List the diagnostic steps or possible causes exactly as documented in the retrieved evidence.\n"
+            "- Preserve any fault codes, sensor thresholds, or test procedures mentioned.\n"
+            "- Do NOT suggest actions not supported by the retrieved evidence."
+        )
+    elif intent == "ROOT_CAUSE_ANALYSIS":
+        return (
+            DEFAULT_SYSTEM_INSTRUCTION + "\n\n"
+            "SPECIFIC DIRECTIVE FOR ROOT CAUSE ANALYSIS:\n"
+            "- Identify the root causes explicitly stated in the retrieved evidence.\n"
+            "- Distinguish between direct causes and contributing factors if the evidence does so.\n"
+            "- Do NOT infer causal chains beyond what the evidence explicitly documents."
+        )
     elif intent == "COMPARISON":
         # Apply specialized safety-symbol directive ONLY when the query actually concerns safety symbols / precaution marks
         is_symbol_query = any(w in q_lower for w in ["symbol", "caution mark", "precaution mark", "warning sign", "safety sign"])

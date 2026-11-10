@@ -137,3 +137,33 @@ class TestIntentAndChannelsInNormalizedQuery:
             assert res.clean_query != ""
             assert res.retrieval_query != ""
             assert res.typo_query != ""
+
+
+class TestIntentRegressionAndCrossManualClassification:
+    @pytest.mark.parametrize("query,expected_intent", [
+        ("What should I do if the engine overheats?", "TROUBLESHOOTING"),
+        ("The hydraulic pressure is dropping, what could be wrong?", "TROUBLESHOOTING"),
+        ("My machine is making a strange noise, what is the issue?", "TROUBLESHOOTING"),
+        ("What is the rated load?", "SPECIFICATION"),
+        ("What is the maximum operating temperature?", "SPECIFICATION"),
+        ("What is the fuel consumption rate?", "SPECIFICATION"),
+        ("When should I change the hydraulic oil?", "MAINTENANCE"),
+        ("How often should I perform an inspection?", "MAINTENANCE"),
+        ("What are the steps to bleed the brakes?", "PROCEDURE"),
+        ("How do I check the oil level?", "PROCEDURE"),
+        ("Compare the hydraulic system and the electrical system", "COMPARISON"),
+        ("How does the hydraulic pump interact with the engine?", "RELATIONSHIP"),
+        ("What is the difference between the main pump and the feed pump?", "COMPARISON"),
+        ("How does the cooling system relate to engine overheating?", "RELATIONSHIP"),
+        ("Compare hydraulic oil specifications with engine oil specifications", "COMPARISON"),
+        ("How does the mechatronics controller affect hydraulic pressure?", "RELATIONSHIP"),
+        ("Explain how the hydraulic system and electrical system work together", "RELATIONSHIP"),
+        ("Hydraulic system vs electrical system performance", "COMPARISON"),
+        ("What is the relationship between engine RPM and hydraulic flow?", "RELATIONSHIP"),
+        ("What are the differences between Section 2 and Section 4 maintenance procedures?", "COMPARISON"),
+    ])
+    def test_regression_questions_correctly_classified(self, norm_service, query, expected_intent):
+        res = norm_service.normalize(query)
+        assert res.intent == expected_intent
+        assert res.intent != ""
+        assert res.intent_confidence >= 0.70

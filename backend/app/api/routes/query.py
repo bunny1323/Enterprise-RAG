@@ -5,6 +5,7 @@ POST /api/v1/search — Raw search endpoint (Retrieval only)
 POST /api/v1/rag/debug — RAG pipeline debug endpoint
 """                                                                                              
 
+import asyncio
 import time
 import uuid
 from pathlib import Path
@@ -21,8 +22,10 @@ from app.api.dependencies import (
     PostgresDep,
     SettingsDep,
     TenantContextDep,
+    require_authenticated_access,
 )
 from app.config.logging import get_logger
+from app.infrastructure.opa.client import OPAClient
 from app.infrastructure.redis.client import RedisClient
 from app.models.query import (
     EvidenceSnippet,
@@ -109,12 +112,7 @@ async def _get_permitted_access_levels(
     tenant_ctx: TenantContext,
 ) -> list[str]:
     """Evaluate the same retrieval policy used by the chat workflow."""
-    opa_client = getattr(request.app.state, "opa", None)
-    if opa_client is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Retrieval policy service is unavailable.",
-        )
+    opa_client = _get_opa_client(request)
 
     decision = await opa_client.evaluate_retrieval_policy(tenant_ctx)
     if not decision.allowed:
@@ -123,6 +121,17 @@ async def _get_permitted_access_levels(
             detail=f"Access denied: {decision.denied_reason}",
         )
     return decision.permitted_access_levels
+
+
+def _get_opa_client(request: Request) -> OPAClient:
+    """Return the configured OPA client or fail explicitly when unavailable."""
+    opa_client: OPAClient | None = getattr(request.app.state, "opa", None)
+    if opa_client is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Retrieval policy service is unavailable.",
+        )
+    return opa_client
 
 
 @router.post(
@@ -156,6 +165,9 @@ async def chat_query(
         tenant=tenant_ctx.tenant_id,
     )
 
+    opa_client = _get_opa_client(request)
+    permitted_access_levels = await _get_permitted_access_levels(request, tenant_ctx)
+
     # 1. Build dependencies
     redis_client: RedisClient | None = getattr(request.app.state, "redis", None)
     cache_svc = CacheService(redis_client, postgres) if redis_client else None
@@ -174,7 +186,7 @@ async def chat_query(
         llm_provider=llm_provider,
         citation_svc=citation_svc,
         verifier_svc=verifier,
-        opa_client=getattr(request.app.state, "opa", None),
+        opa_client=opa_client,
         cache_svc=cache_svc,
         semantic_cache_svc=semantic_cache_svc,
         embedder=embedder,
@@ -197,7 +209,9 @@ async def chat_query(
         tenant_context=tenant_ctx,
         top_k=body.top_k,
         intent="",
-        permitted_access_levels=[],
+        intent_confidence=0.0,
+        permitted_access_levels=permitted_access_levels,
+        policy_authorized=True,
         cache_hit=False,
         retrieval_strategy="",
         dense_results=[],
@@ -282,7 +296,7 @@ async def chat_query(
 
     response_data = QueryResponse(
         answer=final_state["answer"],
-        intent=final_state.get("intent", "GENERAL_QA"),
+        intent=final_state.get("intent") or "GENERAL_QA",
         intent_confidence=final_state.get("intent_confidence", 0.95),
         citations=final_state["citations"],
         confidence=final_state["confidence_level"],
@@ -301,15 +315,21 @@ async def chat_query(
         tables=tables_list,
         pages=sorted(pages_list),
         retrieval_trace={
-            "intent": final_state.get("intent", ""),
+            "intent": final_state.get("intent") or "GENERAL_QA",
             "strategy": final_state.get("retrieval_strategy", ""),
             "dense_count": len(final_state.get("dense_results", [])),
             "bm25_count": len(final_state.get("bm25_results", [])),
             "graph_count": len(final_state.get("graph_results", [])),
             "fused_count": len(final_state.get("fused_results", [])),
             "final_count": len(final_state.get("reranked_results", [])),
+            "structural_count": len(
+                (final_state.get("retrieval_diagnostics") or {})
+                .get("channels", {})
+                .get("structural", [])
+            ),
             "evidence_coverage": final_state.get("evidence_coverage", "COMPLETE"),
             "answerable": final_state.get("answerable", True),
+            "retrieval_diagnostics": final_state.get("retrieval_diagnostics", {}),
             **(final_state.get("retrieval_trace") or {}),
             "latency_ms": latency_ms,
         },
@@ -339,6 +359,7 @@ async def raw_search(
     Pipeline: Dense + BM25 + Graph → RRF Fusion → Reranker → Hierarchical Expansion → Confidence Scoring
     """
     start_time = time.time()
+    trace_id = f"tr_{uuid.uuid4().hex[:12]}"
 
     redis_client: RedisClient | None = getattr(request.app.state, "redis", None)
     cache_svc = CacheService(redis_client, postgres) if redis_client else None
@@ -350,6 +371,7 @@ async def raw_search(
         query=body.query,
         tenant_context=tenant_ctx,
         top_k=body.top_k,
+        trace_id=trace_id,
     )
 
     retrieved_state = await retrieval_agent.retrieve(
@@ -389,6 +411,7 @@ async def rag_debug(
     Does NOT expose: API keys, passwords, tokens, or internal reasoning.
     """
     start_time = time.time()
+    trace_id = f"tr_{uuid.uuid4().hex[:12]}"
 
     redis_client: RedisClient | None = getattr(request.app.state, "redis", None)
     cache_svc = CacheService(redis_client, postgres) if redis_client else None
@@ -405,6 +428,7 @@ async def rag_debug(
         query=body.query,
         tenant_context=tenant_ctx,
         top_k=body.top_k,
+        trace_id=trace_id,
     )
 
     retrieved_state = await retrieval_agent.retrieve(
@@ -423,24 +447,67 @@ async def rag_debug(
 
     llm_prov = getattr(request.app.state, "llm_provider", None)
     provider_name = getattr(llm_prov, "_provider_name", "groq") if llm_prov else "unknown"
+    embedder = request.app.state.embedder
+    embedding_dimension = retrieved_state.retrieval_diagnostics.get("embedding_dimension", 0)
+    weaviate_dimension = None
+    weaviate_distance_metric = None
+    dimension_status = "unavailable"
+    try:
+        weaviate_client = getattr(request.app.state, "weaviate", None)
+        if weaviate_client is not None:
+            weaviate_dimension = await asyncio.to_thread(
+                weaviate_client.get_collection_dimension
+            )
+            weaviate_distance_metric = await asyncio.to_thread(
+                weaviate_client.get_collection_distance_metric
+            )
+            dimension_status = (
+                "unknown"
+                if weaviate_dimension is None or not embedding_dimension
+                else (
+                    "compatible"
+                    if embedding_dimension == weaviate_dimension
+                    else "mismatch"
+                )
+            )
+    except Exception as err:
+        logger.warning(
+            "rag_debug.weaviate_dimension_check_failed",
+            trace_id=trace_id,
+            error_type=type(err).__name__,
+        )
 
     return {
-        "query": body.query,
+        "trace_id": trace_id,
+        "query_normalization": {
+            "normalized_query": retrieved_state.normalized_query,
+            "retrieval_query": retrieved_state.retrieval_diagnostics.get("retrieval_query"),
+            "typo_query": retrieved_state.retrieval_diagnostics.get("typo_query"),
+            "intent": norm.intent,
+        },
         "detected_intent": norm.intent,
         "extracted_entities": norm.extracted_entities,
         "selected_retrieval_strategy": retrieved_state.strategy_used,
-        "embedding_provider": "local",
-        "embedding_model": getattr(request.app.state.embedder, "_model_name", "unknown"),
-        "embedding_dimension": getattr(request.app.state.embedder, "EMBEDDING_DIM", 384),
+        "embedding_provider": getattr(embedder, "provider_name", "local"),
+        "embedding_model": getattr(embedder, "_model_name", "unknown"),
+        "embedding_dimension": embedding_dimension,
+        "configured_embedding_dimension": getattr(embedder, "EMBEDDING_DIM", None),
+        "weaviate_vector_dimension": weaviate_dimension,
+        "weaviate_distance_metric": weaviate_distance_metric,
+        "vector_dimension_status": dimension_status,
         "weaviate_collection": "DocumentChunk",
         "llm_provider": provider_name,
         "dense_result_count": len(retrieved_state.dense_results),
         "bm25_result_count": len(retrieved_state.bm25_results),
         "graph_result_count": len(retrieved_state.graph_results),
+        "structural_result_count": len(
+            retrieved_state.retrieval_diagnostics.get("channels", {}).get("structural", [])
+        ),
         "fused_result_count": len(retrieved_state.fused_results),
+        "results_after_rrf": retrieved_state.retrieval_diagnostics.get("fused_candidates", []),
+        "results_after_reranking": retrieved_state.retrieval_diagnostics.get("reranked_candidates", []),
         "reranker_status": "cross_encoder" if "rerank" in retrieved_state.strategy_used else "rrf_fusion",
         "final_evidence_count": len(retrieved_state.reranked_results),
-        "source_manuals": ctx_summary.get("source_manuals", []),
         "context_chunks_count": ctx_summary.get("context_chunks_count", 0),
         "context_char_count": ctx_summary.get("context_char_count", 0),
         "context_truncated": ctx_summary.get("context_truncated", False),
@@ -452,6 +519,10 @@ async def rag_debug(
             "entities_found": cov.entities_found,
             "relationship_supported": cov.relationship_supported,
         },
+        "access_level_filters": permitted_access_levels,
+        "tenant_scope": tenant_ctx.tenant_id,
+        "knowledge_base_scope": tenant_ctx.knowledge_base_id,
+        "verification_status": "NOT_RUN_DEBUG_ONLY",
         "source_ids": [r.chunk_id for r in retrieved_state.reranked_results],
         "page_numbers": list({r.page_number for r in retrieved_state.reranked_results if r.page_number}),
         "retrieval_diagnostics": retrieved_state.retrieval_diagnostics,
@@ -533,8 +604,12 @@ class FeedbackRequest(BaseModel):
     "/feedback",
     summary="Record user feedback on answer quality",
 )
-async def submit_feedback(body: FeedbackRequest) -> dict:
+async def submit_feedback(
+    body: FeedbackRequest,
+    tenant_ctx: TenantContextDep,
+) -> dict:
     """Record user feedback (thumbs up / thumbs down) for answer quality tracking."""
+    require_authenticated_access(tenant_ctx, "Feedback submission")
     logger.info(
         "query.feedback_recorded",
         query_id=body.query_id,

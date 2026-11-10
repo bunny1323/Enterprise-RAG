@@ -107,9 +107,12 @@ class MetadataService:
             enriched_chunk = chunk.model_copy(
                 update={
                     "industry_domain": industry,
-                    "access_classification": chunk.access_classification
-                    if chunk.access_classification != "INTERNAL"
-                    else default_classification,
+                    "access_classification": (
+                        chunk.access_classification
+                        if chunk.access_classification
+                        in {"PUBLIC", "INTERNAL", "RESTRICTED"}
+                        else default_classification
+                    ),
                     "metadata": meta,
                 }
             )
@@ -124,9 +127,12 @@ class MetadataService:
 
     @staticmethod
     def _get_default_classification(config: dict[str, Any]) -> str:
-        """Return the first classification from config, defaulting to INTERNAL."""
-        classifications = config.get("security_classifications", [])
-        # INTERNAL is always the safe default
-        if "INTERNAL" in classifications:
-            return "INTERNAL"
-        return classifications[0] if classifications else "INTERNAL"
+        """Keep ingestion fail-closed; PUBLIC requires an explicit admin operation."""
+        configured = config.get("default_classification")
+        if configured is not None and configured != "INTERNAL":
+            logger.warning(
+                "metadata.unsafe_default_classification_ignored",
+                configured=configured,
+                fallback="INTERNAL",
+            )
+        return "INTERNAL"

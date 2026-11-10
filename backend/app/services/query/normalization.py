@@ -353,8 +353,9 @@ class QueryNormalizationService:
 
         # ── 4. SECTION_LOOKUP ─────────────────────────────────────────────────
         # Matches: "what is section 3", "show section 5", "tell me about section 9"
+        is_comp = any(kw in lowered for kw in ["compare", "difference", "differences", " vs ", " vs.", "versus"])
         section_match = re.search(r"\bsection\s+(\d+)\b", lowered)
-        if section_match:
+        if section_match and not is_comp:
             sec_num = int(section_match.group(1))
             entities.append(f"section_{sec_num}")
             return NormalizedQuery(
@@ -385,7 +386,7 @@ class QueryNormalizationService:
                 answer_type="list",
             )
 
-        is_rel = any(kw in lowered for kw in ["relationship between", "how is", "related to", "affects", "correlates to", "connection between"])
+        is_rel = any(kw in lowered for kw in ["relationship between", "how is", "related to", "relate to", "relates to", "affects", "correlates to", "connection between", "connected to", "work together", "works together", "interact", "interacts"])
         is_multihop = any(kw in lowered for kw in ["which section", "and what does", "and which section"])
 
         if is_multihop:
@@ -411,9 +412,23 @@ class QueryNormalizationService:
             )
 
         # ── 6. Other intent heuristics ────────────────────────────────────────
+        # NOTE: Order matters — specific comparative and diagnostic inquiries take
+        # priority over single-word domain keywords (e.g. "specification" in a comparison query).
         intent = "GENERAL_QA"
         intent_conf = 0.60
-        if any(kw in lowered for kw in ["diagram", "schematic", "drawing", "blueprint"]):
+
+        # Comparative questions across components, systems, or manuals:
+        if any(kw in lowered for kw in ["compare", "difference", "differences", " vs ", " vs.", "versus"]):
+            intent = "COMPARISON"
+            intent_conf = 0.92
+            comp_match = re.search(
+                r"(?:differences? between|compare)\s+(?:the\s+)?(.+?)\s+(?:and|vs\.?|versus)\s+(?:the\s+)?(.+?)(?:\?|$)",
+                lowered,
+            )
+            if comp_match:
+                entities.append(comp_match.group(1).strip())
+                entities.append(comp_match.group(2).strip())
+        elif any(kw in lowered for kw in ["diagram", "schematic", "drawing", "blueprint"]):
             intent = "DIAGRAM_RETRIEVAL"
             intent_conf = 0.88
         elif any(kw in lowered for kw in ["image", "photo", "picture"]):
@@ -425,38 +440,47 @@ class QueryNormalizationService:
         elif any(kw in lowered for kw in ["how to", "procedure", "steps", "instructions"]):
             intent = "PROCEDURE"
             intent_conf = 0.90
+        elif any(kw in lowered for kw in ["how do i", "how should i", "what is the process", "how can i"]):
+            intent = "PROCEDURE"
+            intent_conf = 0.85
         elif any(kw in lowered for kw in ["maintenance", "replace", "install", "service"]):
             intent = "MAINTENANCE"
             intent_conf = 0.90
-        elif any(kw in lowered for kw in ["specification", "capacity", "torque", "clearance", "weight", "dimension", "size"]):
-            intent = "SPECIFICATION"
-            intent_conf = 0.90
+        elif any(kw in lowered for kw in ["when should", "how often", "interval", "schedule", "periodic"]):
+            intent = "MAINTENANCE"
+            intent_conf = 0.85
         elif any(kw in lowered for kw in ["troubleshoot", "problem", "issue", "symptom", "won't start", "not working"]):
             intent = "TROUBLESHOOTING"
             intent_conf = 0.90
+        elif any(kw in lowered for kw in ["what should i do if", "what do i do when",
+                                           "dropping", "failing", "going wrong", "not responding"]):
+            intent = "TROUBLESHOOTING"
+            intent_conf = 0.85
+        elif any(kw in lowered for kw in ["specification", "capacity", "torque", "clearance", "weight", "dimension", "size"]):
+            intent = "SPECIFICATION"
+            intent_conf = 0.90
+        elif any(kw in lowered for kw in ["affect", "effect", "influence", "impact", "interact"]):
+            intent = "RELATIONSHIP"
+            intent_conf = 0.82
+        elif any(kw in lowered for kw in ["rated", "maximum", "minimum", "limit", "rating", "range",
+                                           "output", "consumption", "pressure", "voltage", "current", "power"]):
+            intent = "SPECIFICATION"
+            intent_conf = 0.85
         elif any(kw in lowered for kw in ["cause", "root cause", "why did"]):
             intent = "ROOT_CAUSE_ANALYSIS"
             intent_conf = 0.88
         elif any(kw in lowered for kw in ["predict", "likely to fail", "history", "failure rate"]):
             intent = "PREDICTIVE_MAINTENANCE"
             intent_conf = 0.85
-        elif any(kw in lowered for kw in ["compare", "difference between", "vs"]):
-            intent = "COMPARISON"
-            intent_conf = 0.92
-            # Extract the two entities being compared (e.g. "safety" and "caution")
-            comp_match = re.search(
-                r"(?:difference between|compare)\s+(?:the\s+)?(.+?)\s+(?:and|vs\.?|versus)\s+(?:the\s+)?(.+?)(?:\?|$)",
-                lowered
-            )
-            if comp_match:
-                entities.append(comp_match.group(1).strip())
-                entities.append(comp_match.group(2).strip())
-        elif re.search(r"\b[a-z0-9]+-[0-9]+\b", lowered) or any(kw in lowered for kw in ["error code", "fault code"]):
+        elif re.search(r"[a-z0-9]+-[0-9]+", lowered) or any(kw in lowered for kw in ["error code", "fault code"]):
             intent = "ERROR_CODE"
             intent_conf = 0.92
         elif any(kw in lowered for kw in ["connected to", "relationship", "depends on"]):
             intent = "RELATIONSHIP"
             intent_conf = 0.88
+        elif any(kw in lowered for kw in ["function", "purpose", "role", "what does", "what is the", "describe", "explain"]):
+            intent = "GENERAL_QA"
+            intent_conf = 0.75
 
         return NormalizedQuery(
             raw_query=query,

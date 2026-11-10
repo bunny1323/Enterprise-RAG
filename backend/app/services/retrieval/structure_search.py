@@ -7,7 +7,6 @@ Queries the canonical `document_structure` table in PostgreSQL for:
 - Page number format explanations (PAGE_NUMBER_FORMAT / EXACT_LOOKUP)
 - Exact structural references
 """
-from typing import Any
 from app.config.logging import get_logger
 from app.infrastructure.postgres.client import PostgresClient
 from app.models.retrieval import SearchResult
@@ -27,26 +26,30 @@ class StructureSearchService:
         self,
         document_id: str | None,
         tenant_id: str = "default",
+        knowledge_base_id: str = "default",
     ) -> str | None:
         """Resolve a duplicate document_id to its canonical_document_id if applicable."""
         if not document_id:
             return None
+        from uuid import UUID
+
         try:
-            from uuid import UUID
             doc_uuid = UUID(str(document_id))
+        except ValueError:
+            pass
+        else:
             row = await self._postgres.fetchrow(
                 """
                 SELECT canonical_document_id, status
                 FROM documents
-                WHERE id = $1 AND tenant_id = $2
+                WHERE id = $1 AND tenant_id = $2 AND knowledge_base_id = $3
                 """,
                 doc_uuid,
                 tenant_id,
+                knowledge_base_id,
             )
             if row and row.get("status") == "DUPLICATE" and row.get("canonical_document_id"):
                 return str(row["canonical_document_id"])
-        except Exception:
-            pass
         return document_id
 
     async def count_sections(
@@ -54,13 +57,17 @@ class StructureSearchService:
         tenant_id: str = "default",
         knowledge_base_id: str = "default",
         document_id: str | None = None,
+        permitted_access_levels: list[str] | None = None,
     ) -> int:
         """Count unique major sections."""
-        resolved_doc_id = await self.resolve_canonical_document_id(document_id, tenant_id)
+        resolved_doc_id = await self.resolve_canonical_document_id(
+            document_id, tenant_id, knowledge_base_id
+        )
         count = await self._postgres.count_sections(
             tenant_id=tenant_id,
             knowledge_base_id=knowledge_base_id,
             document_id=resolved_doc_id,
+            permitted_access_levels=permitted_access_levels,
         )
         logger.info("structure_search.count_sections", count=count, tenant=tenant_id)
         return count
@@ -70,15 +77,19 @@ class StructureSearchService:
         tenant_id: str = "default",
         knowledge_base_id: str = "default",
         document_id: str | None = None,
+        permitted_access_levels: list[str] | None = None,
     ) -> list[SearchResult]:
         """
         Fetch all canonical sections and format as SearchResults for seamless RAG evidence injection.
         """
-        resolved_doc_id = await self.resolve_canonical_document_id(document_id, tenant_id)
+        resolved_doc_id = await self.resolve_canonical_document_id(
+            document_id, tenant_id, knowledge_base_id
+        )
         rows = await self._postgres.get_sections(
             tenant_id=tenant_id,
             knowledge_base_id=knowledge_base_id,
             document_id=resolved_doc_id,
+            permitted_access_levels=permitted_access_levels,
         )
         results: list[SearchResult] = []
         for row in rows:
@@ -90,7 +101,7 @@ class StructureSearchService:
 
             results.append(
                 SearchResult(
-                    chunk_id=f"struct::section::{sec_num}::{page_num}",
+                    chunk_id=f"struct::section::{doc_id}::{sec_num}::{page_num}",
                     score=1.0,
                     content=f"SECTION {sec_num}: {title}\n{raw_text}".strip(),
                     page_number=page_num,
@@ -110,6 +121,7 @@ class StructureSearchService:
         notation: str | None = None,
         tenant_id: str = "default",
         knowledge_base_id: str = "default",
+        permitted_access_levels: list[str] | None = None,
     ) -> list[SearchResult]:
         """
         Fetch page-format explanation entries from document_structure.
@@ -118,6 +130,7 @@ class StructureSearchService:
             tenant_id=tenant_id,
             knowledge_base_id=knowledge_base_id,
             notation=notation,
+            permitted_access_levels=permitted_access_levels,
         )
         results: list[SearchResult] = []
         for idx, row in enumerate(rows):
@@ -128,7 +141,7 @@ class StructureSearchService:
 
             results.append(
                 SearchResult(
-                    chunk_id=f"struct::page_format::{idx}::{page_num}",
+                    chunk_id=f"struct::page_format::{doc_id}::{idx}::{page_num}",
                     score=1.0,
                     content=raw_text,
                     page_number=page_num,
